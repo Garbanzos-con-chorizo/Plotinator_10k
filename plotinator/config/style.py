@@ -61,6 +61,9 @@ class StyleConfig:
     legend_visible: bool = True
     legend_position: str = "top right"
 
+    z_label: str = "Z"
+    z_unit: str = ""
+
     font_family: str = "Segoe UI"
     font_size: int = 11
     title_font_size: int = 16
@@ -113,6 +116,8 @@ class StyleConfig:
             "grid_layer": self.grid_layer,
             "legend_visible": self.legend_visible,
             "legend_position": self.legend_position,
+            "z_label": self.z_label,
+            "z_unit": self.z_unit,
             "font_family": self.font_family,
             "font_size": self.font_size,
             "title_font_size": self.title_font_size,
@@ -127,9 +132,14 @@ class StyleConfig:
     def axis_label_with_unit(self, axis: str) -> str:
         if axis == "x":
             label, unit = self.x_label, self.x_unit
-        else:
+            fallback = "X"
+        elif axis == "y":
             label, unit = self.y_label, self.y_unit
-        label = label or ("X" if axis == "x" else "Y")
+            fallback = "Y"
+        else:
+            label, unit = self.z_label, self.z_unit
+            fallback = "Z"
+        label = label or fallback
         if unit:
             return f"{label} [{unit}]"
         return label

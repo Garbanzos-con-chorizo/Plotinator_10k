@@ -13,6 +13,7 @@ from tkinter import filedialog, messagebox
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 
+from plotinator.engine.geometries import GEOMETRY_REGISTRY
 CONFIG_PATH = "config.json"
 
 
@@ -210,12 +211,64 @@ class PlotinatorApp(ttkb.Window):
             entries[key] = entry
         general_tab.columnconfigure(1, weight=1)
 
+        geometry_payload = data.get("geometry") if isinstance(data.get("geometry"), dict) else {}
+        geometry_type = geometry_payload.get("type", "curve")
+        geometry_var = tk.StringVar(value=geometry_type)
+        ttkb.Label(general_tab, text="Geometry").grid(row=len(entries), column=0, sticky="w", padx=5, pady=6)
+        geometry_combo = ttkb.Combobox(
+            general_tab,
+            textvariable=geometry_var,
+            values=sorted(GEOMETRY_REGISTRY.choices()),
+            state="readonly",
+        )
+        geometry_combo.grid(row=len(entries), column=1, sticky="ew", padx=5, pady=6)
+
+        ttkb.Label(general_tab, text="Geometry options (JSON)").grid(
+            row=len(entries) + 1,
+            column=0,
+            sticky="nw",
+            padx=5,
+            pady=6,
+        )
+        geometry_text = tk.Text(general_tab, height=4)
+        try:
+            geom_opts = geometry_payload.get("options", {})
+            geometry_text.insert("1.0", json.dumps(geom_opts, indent=2))
+        except Exception:
+            geometry_text.insert("1.0", "{}")
+        geometry_text.grid(row=len(entries) + 1, column=1, sticky="nsew", padx=5, pady=6)
+        general_tab.rowconfigure(len(entries) + 1, weight=1)
+
         residual_var = tk.BooleanVar(value=data.get("residuals", True))
-        ttkb.Checkbutton(
+        residual_check = ttkb.Checkbutton(
             general_tab,
             text="Generate residual plot",
             variable=residual_var,
-        ).grid(row=len(entries), column=0, columnspan=2, sticky="w", padx=5, pady=6)
+        )
+        residual_row = len(entries) + 2
+        residual_check.grid(row=residual_row, column=0, columnspan=2, sticky="w", padx=5, pady=6)
+
+        def _sync_geometry_state(*_args) -> None:
+            try:
+                geom = GEOMETRY_REGISTRY.get(geometry_var.get())
+            except KeyError:
+                geom = GEOMETRY_REGISTRY.get("curve")
+                geometry_var.set("curve")
+            if geom.supports_fit:
+                entries["formula"].configure(state="normal")
+                if not entries["formula"].get().strip():
+                    entries["formula"].insert(0, "a*x + b")
+            else:
+                entries["formula"].configure(state="disabled")
+                entries["formula"].delete(0, tk.END)
+            if geom.supports_residuals:
+                residual_check.configure(state="normal")
+            else:
+                residual_var.set(False)
+                residual_check.configure(state="disabled")
+
+        geometry_combo.bind("<<ComboboxSelected>>", _sync_geometry_state)
+        _sync_geometry_state()
 
         # Layout tab ---------------------------------------------------
         ttkb.Label(layout_tab, text="Rows").grid(row=0, column=0, sticky="w", padx=5, pady=6)
@@ -332,6 +385,33 @@ class PlotinatorApp(ttkb.Window):
                 "color": entries["color"].get().strip() or "#1f77b4",
                 "residuals": residual_var.get(),
             }
+            try:
+                geometry_type = geometry_var.get()
+                geometry = GEOMETRY_REGISTRY.get(geometry_type)
+            except KeyError:
+                messagebox.showerror("Invalid geometry", f"Unknown geometry type: {geometry_var.get()}")
+                return
+
+            if not geometry.supports_fit:
+                payload["formula"] = ""
+                payload["residuals"] = False
+
+            options_raw = geometry_text.get("1.0", tk.END).strip()
+            if options_raw:
+                try:
+                    geometry_options = json.loads(options_raw)
+                    if not isinstance(geometry_options, dict):
+                        raise ValueError
+                except (json.JSONDecodeError, ValueError):
+                    messagebox.showerror(
+                        "Invalid geometry options",
+                        "Geometry options must be a JSON object.",
+                    )
+                    return
+            else:
+                geometry_options = {}
+
+            payload["geometry"] = {"type": geometry.type, "options": geometry_options}
             payload["layout"] = {
                 "rows": max(1, int(rows_spin.get() or 1)),
                 "columns": max(1, int(cols_spin.get() or 1)),
@@ -359,6 +439,15 @@ class PlotinatorApp(ttkb.Window):
         fit.setdefault("formula", "a*x + b")
         fit.setdefault("residuals", True)
         fit.setdefault("color", "#1f77b4")
+        geometry = fit.get("geometry")
+        if isinstance(geometry, dict):
+            geometry.setdefault("type", "curve")
+            if not isinstance(geometry.get("options"), dict):
+                geometry["options"] = {}
+        elif isinstance(geometry, str):
+            fit["geometry"] = {"type": geometry, "options": {}}
+        else:
+            fit["geometry"] = {"type": "curve", "options": {}}
         layout = fit.setdefault("layout", {})
         layout.setdefault("rows", 1)
         layout.setdefault("columns", 1)
@@ -397,6 +486,11 @@ class PlotinatorApp(ttkb.Window):
             "x": int(columns.get("x", 1) or 1),
             "y": int(columns.get("y", 2) or 2),
         }
+        if columns.get("z") not in (None, ""):
+            try:
+                cleaned_columns["z"] = int(columns.get("z"))
+            except (TypeError, ValueError):
+                cleaned_columns["z"] = columns.get("z")
         if columns.get("error") not in (None, ""):
             try:
                 cleaned_columns["error"] = int(columns.get("error"))
@@ -467,6 +561,11 @@ class DatasetDialog(ttkb.Toplevel):
         self.y_spin.grid(row=4, column=1, sticky="w", padx=10, pady=6)
         self.y_spin.set(str(columns.get("y", 2)))
 
+        ttkb.Label(self, text="Z column").grid(row=5, column=0, sticky="w", padx=10, pady=6)
+        self.z_spin = ttkb.Spinbox(self, from_=1, to=128, width=6)
+        self.z_spin.grid(row=5, column=1, sticky="w", padx=10, pady=6)
+        self.z_spin.set(str(columns.get("z", "")))
+
         ttkb.Label(self, text="Error column").grid(row=3, column=2, sticky="w", padx=10, pady=6)
         self.error_entry = ttkb.Entry(self, width=6)
         if columns.get("error") not in (None, ""):
@@ -525,10 +624,22 @@ class DatasetDialog(ttkb.Toplevel):
             messagebox.showerror("Invalid input", "X and Y columns must be integers.")
             return
 
+        z_raw = self.z_spin.get().strip()
+        if z_raw:
+            try:
+                z_col = int(z_raw)
+            except ValueError:
+                messagebox.showerror("Invalid input", "Z column must be an integer if provided.")
+                return
+        else:
+            z_col = None
+
         error_col = self.error_entry.get().strip()
         weight_col = self.weight_entry.get().strip()
 
         columns: dict[str, int | str] = {"x": x_col, "y": y_col}
+        if z_col:
+            columns["z"] = z_col
         if error_col:
             try:
                 columns["error"] = int(error_col)

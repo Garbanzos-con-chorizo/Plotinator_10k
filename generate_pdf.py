@@ -56,6 +56,16 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         md.append(f"## {title}")
         md.append(f"**Formula:** `{formula}`  ")
 
+        geometry = item.get("geometry") or {}
+        geom_type = geometry.get("type")
+        if geom_type:
+            md.append(f"**Geometry:** {geom_type}")
+            options = geometry.get("options")
+            if isinstance(options, dict) and options:
+                md.append("- Options:")
+                for key, value in options.items():
+                    md.append(f"  - {key}: {value}")
+
         # Parameters table
         params = item.get("parameters", {})
         if params:
@@ -113,13 +123,25 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         if confidence:
             md.append(f"\n> {confidence}")
 
-        # Images
-        plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
-        res_path = item.get("residuals_plot")
-        md.append(f"![Plot]({plot_path})")
-        if res_path:
-            residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
-            md.append(f"![Residuals]({residuals_path})")
+        assets = item.get("assets")
+        if assets:
+            md.append("\n**Visuals:**")
+            for asset in assets:
+                asset_path = asset.get("path")
+                if not asset_path:
+                    continue
+                rel_path = os.path.relpath(asset_path, output_folder).replace("\\", "/")
+                caption = asset.get("caption") or asset.get("type", "Figure").title()
+                md.append(f"![{caption}]({rel_path})")
+                md.append(f"*{caption}*")
+        else:
+            # Legacy compatibility
+            plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
+            res_path = item.get("residuals_plot")
+            md.append(f"![Plot]({plot_path})")
+            if res_path:
+                residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
+                md.append(f"![Residuals]({residuals_path})")
 
         md.append("\n---\n")
 

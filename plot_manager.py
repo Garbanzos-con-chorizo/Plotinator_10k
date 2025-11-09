@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 
 from plotinator.config.style import StyleConfig
+from plotinator.engine.geometries import GEOMETRY_REGISTRY
 
 
 PYFIT_RE = re.compile(
@@ -134,55 +135,6 @@ def compute_residual_metrics(
     return {"mean": mean, "std": std, "rmse": rmse}
 
 
-def estimate_initial_params(
-    datafile: str, params: list[str], column_map: dict | None = None
-) -> dict:
-    """Return stable, non-zero initial guesses for fit parameters."""
-
-    column_map = column_map or {}
-    x_idx = int(column_map.get("x", 1)) - 1
-    y_idx = int(column_map.get("y", 2)) - 1
-    arr = np.loadtxt(datafile, usecols=(x_idx, y_idx))
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 2)
-    y = arr[:, 1]
-
-    y_abs = np.abs(y)
-    scale = float(
-        max(
-            y_abs.mean() if y_abs.size else 0.0,
-            np.ptp(y_abs) if y_abs.size else 0.0,
-            1.0,
-        )
-    )
-
-    floor_eps = max(1e-3, scale * 1e-6)
-
-    guesses: dict[str, float] = {}
-    for i, param in enumerate(params, start=1):
-        val = 0.5 * i * scale
-        if abs(val) < floor_eps:
-            val = floor_eps
-        guesses[param] = float(val)
-
-    seen: set[float] = set()
-    bump = floor_eps
-    for key in list(guesses.keys()):
-        value = guesses[key]
-        if not (np.isfinite(value) and abs(value) >= floor_eps):
-            value = floor_eps
-        while value in seen:
-            value += bump
-        seen.add(value)
-        guesses[key] = value
-
-    return guesses
-
-
-def _escape(text: str) -> str:
-    return (text or "").replace("\\", "\\\\").replace('"', '\"')
-
-
 def generate_gnuplot_code(
     cfg: dict, out_plot: str | None, out_residuals: str | None = None
 ) -> str:
@@ -193,145 +145,30 @@ def generate_gnuplot_code(
         else StyleConfig.from_dict(raw_style, fallback_color=cfg.get("color"))
     )
 
-    pt = style_cfg.point_type
-    lw = style_cfg.line_width
-    col = style_cfg.line_color
+    geometry_info = cfg.get("geometry") or {"type": "curve", "options": {}}
+    geometry_type = geometry_info.get("type", "curve")
+    geometry = GEOMETRY_REGISTRY.get(geometry_type)
 
-    formula = cfg["fit_formula"]
-    params = cfg["fit_params"]
-    params_csv = ",".join(params)
-    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
-    column_map = cfg.get("column_map", {})
-    x_col = column_map.get("x", 1)
-    y_col = column_map.get("y", 2)
-    err_col = column_map.get("error")
-    weight_col = column_map.get("weight")
-    use_err = bool(err_col)
+    if out_residuals and not geometry.supports_residuals:
+        out_residuals = None
 
-    def _style_commands(
-        title: str, x_label: str, y_label: str, *, force_linear_y: bool = False
-    ) -> str:
-        lines: list[str] = [
-            "set encoding utf8",
-            f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\"",
-            f"set title \"{_escape(title)}\" font \",{style_cfg.title_font_size}\"",
-            f"set xlabel \"{_escape(x_label)}\" font \",{style_cfg.axis_label_font_size}\"",
-            f"set ylabel \"{_escape(y_label)}\" font \",{style_cfg.axis_label_font_size}\"",
-            f"set xtics font \",{style_cfg.tick_font_size}\"",
-            f"set ytics font \",{style_cfg.tick_font_size}\"",
-        ]
-
-        if style_cfg.x_scale == "log":
-            lines.append("set logscale x")
-        else:
-            lines.append("unset logscale x")
-
-        if not force_linear_y and style_cfg.y_scale == "log":
-            lines.append("set logscale y")
-        else:
-            lines.append("unset logscale y")
-
-        if style_cfg.x_tick_format:
-            lines.append(f"set format x \"{_escape(style_cfg.x_tick_format)}\"")
-        else:
-            lines.append("set format x")
-
-        if style_cfg.y_tick_format and not force_linear_y:
-            lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
-        else:
-            lines.append("set format y")
-
-        if style_cfg.grid:
-            lines.append(f"set grid {style_cfg.grid_layer}")
-        else:
-            lines.append("unset grid")
-
-        if style_cfg.legend_visible and not force_linear_y:
-            lines.append(style_cfg.legend_gnuplot_clause())
-        else:
-            lines.append("unset key")
-
-        return "\n".join(lines)
-
-    guesses = estimate_initial_params(datafile, params, column_map)
-    overrides = cfg.get("initial_params") or {}
-    for key, value in overrides.items():
-        if key in guesses and isinstance(value, (int, float)):
-            guesses[key] = float(value)
-    init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
-    prints = "\n".join(
-        [
-            (
-                f'if (exists("{p}_err")) {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) }} '
-                f'else {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
-            )
-            for p in params
-        ]
+    return geometry.generate_gnuplot_script(
+        cfg,
+        style_cfg,
+        out_plot=out_plot,
+        out_residuals=out_residuals,
     )
-
-    fit_using: list[str] = []
-    if x_col != 1 or y_col != 2 or err_col or weight_col:
-        fit_using.extend([str(x_col), str(y_col)])
-        if err_col:
-            fit_using.append(str(err_col))
-        elif weight_col:
-            fit_using.append(str(weight_col))
-
-    fit_clause = f'fit f(x) "{datafile}"'
-    if fit_using:
-        fit_clause += f" using {':'.join(fit_using)}"
-    fit_clause += f" via {params_csv}"
-
-    code = f"""
-{_style_commands(cfg['title'], style_cfg.axis_label_with_unit('x'), style_cfg.axis_label_with_unit('y'))}
-
-set fit errorvariables
-{init_lines}
-
-f(x) = {formula}
-{fit_clause}
-
-{prints}
-
-"""
-    if out_plot:
-        code += f"set output \"{out_plot}\"\n"
-        data_cols = [str(x_col), str(y_col)]
-        if err_col:
-            data_cols.append(str(err_col))
-        data_using = ":".join(data_cols)
-        if use_err:
-            code += (
-                f"plot \"{datafile}\" using {data_using} with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
-                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
-            )
-        else:
-            code += (
-                f"plot \"{datafile}\" using {data_using} title \"Data\" with points pt {pt}, \\\n"
-                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
-            )
-        code += "unset output\n"
-
-    if out_residuals:
-        code += f"""
-set output "{out_residuals}"
-{_style_commands(f"Residuals — {cfg['title']}", style_cfg.axis_label_with_unit('x'), "Residual (y - f(x))", force_linear_y=True)}
-plot "{datafile}" using {x_col}:(column({y_col}) - f(column({x_col}))) with points pt {pt} title "Residuals", \\
-     0 with lines notitle lc rgb "gray"
-unset output
-"""
-    return code
 
 
 def _ensure_columns_dict(columns: dict | None) -> dict:
-    base = {"x": 1, "y": 2, "error": None, "weight": None}
+    base = {"x": 1, "y": 2, "z": None, "error": None, "weight": None}
     if not isinstance(columns, dict):
         return base
     result = base.copy()
-    for key in ("x", "y", "error", "weight"):
+    for key in ("x", "y", "z", "error", "weight"):
         val = columns.get(key)
         if val is None or val == "":
-            result[key] = None if key in {"error", "weight"} else base[key]
+            result[key] = None if key in {"z", "error", "weight"} else base[key]
             continue
         try:
             ival = int(val)
@@ -520,11 +357,23 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     base_dir = os.path.dirname(os.path.abspath(config_path))
     normalized: list[dict] = []
     for fit in fits:
-        formula = fit.get("formula") or fit.get("fit_formula") or "a*x + b"
-        params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
-        params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
-        if not params:
-            raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+        title = fit.get("title", "Untitled")
+
+        raw_geometry = fit.get("geometry")
+        if isinstance(raw_geometry, dict):
+            geometry_type = raw_geometry.get("type", "curve")
+            geometry_options = raw_geometry.get("options")
+        elif isinstance(raw_geometry, str):
+            geometry_type = raw_geometry
+            geometry_options = {}
+        else:
+            geometry_type = "curve"
+            geometry_options = {}
+
+        try:
+            geometry = GEOMETRY_REGISTRY.get(geometry_type)
+        except KeyError as exc:
+            raise ValueError(f"Fit '{title}' references unknown geometry '{geometry_type}'") from exc
 
         style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
         if fit.get("color"):
@@ -571,28 +420,48 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
             )
 
         primary_dataset = datasets[0]
-        initial_params = {}
-        for key in params:
-            try:
-                initial_params[key] = float(params_dict.get(key, ""))
-            except (TypeError, ValueError, AttributeError):
-                continue
+
+        column_map = primary_dataset["column_map"]
+        try:
+            normalized_options = geometry.normalize_options(geometry_options, column_map=column_map)
+        except ValueError as exc:
+            raise ValueError(f"Fit '{title}' has invalid geometry options: {exc}") from exc
+
+        if geometry.supports_fit:
+            formula = fit.get("formula") or fit.get("fit_formula") or "a*x + b"
+            params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
+            params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
+            if not params:
+                raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+            initial_params = {}
+            for key in params:
+                try:
+                    initial_params[key] = float(params_dict.get(key, ""))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+        else:
+            formula = fit.get("formula") or fit.get("fit_formula") or ""
+            params = []
+            initial_params = {}
+
+        residuals_enabled = bool(fit.get("residuals", True)) and geometry.supports_residuals
 
         normalized.append(
             {
-                "title": fit.get("title", "Untitled"),
+                "title": title,
                 "fit_formula": formula,
                 "datafile": primary_dataset["datafile"],
-                "residuals": bool(fit.get("residuals", True)),
+                "residuals": residuals_enabled,
                 "style": style,
                 "style_model": style_cfg,
                 "fit_params": params,
                 "initial_params": initial_params,
-                "column_map": primary_dataset["column_map"],
+                "column_map": column_map,
                 "error_bars": primary_dataset["error_bars"],
                 "data_source": primary_dataset["data_source"],
                 "datasets": datasets,
                 "layout": layout,
+                "geometry": {"type": geometry.type, "options": normalized_options},
             }
         )
 
@@ -718,6 +587,10 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
 
+    geometry_info = plot_cfg.get("geometry") or {"type": "curve", "options": {}}
+    geometry_type = geometry_info.get("type", "curve")
+    geometry = GEOMETRY_REGISTRY.get(geometry_type)
+
     out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
 
     data_prep = prepare_datafile(plot_cfg, plot_dir)
@@ -725,11 +598,11 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
 
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
-    params = parse_fit_output(output_text)
+    params = parse_fit_output(output_text) if geometry.supports_fit else {}
 
     residuals_path: str | None
     metrics: dict | None
-    if params and plot_cfg.get("residuals", True):
+    if geometry.supports_residuals and plot_cfg.get("residuals", True) and params:
         residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
         metrics = compute_residual_metrics(
             plot_cfg["datafile"], plot_cfg.get("column_map", {}), params, plot_cfg["fit_formula"]
@@ -747,6 +620,22 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     elif column_map.get("weight"):
         confidence_notes = f"Fit weighted by column {column_map['weight']}"
 
+    assets = [
+        {
+            "type": geometry.type,
+            "path": out_plot,
+            "caption": geometry.asset_caption(plot_cfg),
+        }
+    ]
+    if residuals_path:
+        assets.append(
+            {
+                "type": "residuals",
+                "path": residuals_path,
+                "caption": geometry.residual_caption(plot_cfg),
+            }
+        )
+
     result = {
         "title": plot_cfg["title"],
         "formula": plot_cfg["fit_formula"],
@@ -763,6 +652,9 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
             "preprocessing": data_prep.get("applied_steps", []),
         },
         "confidence_notes": confidence_notes,
+        "geometry": geometry_info,
+        "assets": assets,
+        "matplotlib_stub": geometry.generate_matplotlib_stub(plot_cfg),
     }
 
     print(f"[OK] Finished: {plot_cfg['title']}")
