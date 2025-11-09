@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+
 import pypandoc
 
 PANDOC_ENV_VAR = "PANDOC_PATH"
@@ -54,6 +55,15 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         formula = item["formula"]
         md.append(f"## {title}")
         md.append(f"**Formula:** `{formula}`  ")
+        geometry_label = item.get("geometry_label") or item.get("geometry")
+        if geometry_label:
+            md.append(f"**Geometry:** {geometry_label}  ")
+
+        geometry_options = item.get("geometry_options") or {}
+        if geometry_options:
+            md.append("**Geometry Options:**")
+            for key, value in geometry_options.items():
+                md.append(f"- `{key}` = {value}")
 
         # Parameters table
         params = item.get("parameters", {})
@@ -75,12 +85,24 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
             )
 
         # Images
-        plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
+        plot_path = item.get("output_plot")
+        if plot_path:
+            rel_plot_path = os.path.relpath(plot_path, output_folder).replace("\\", "/")
+            md.append(f"![Plot]({rel_plot_path})")
+
         res_path = item.get("residuals_plot")
-        md.append(f"![Plot]({plot_path})")
         if res_path:
             residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
             md.append(f"![Residuals]({residuals_path})")
+
+        for asset in item.get("extra_assets", []):
+            asset_path = asset.get("path")
+            if not asset_path:
+                continue
+            rel_asset_path = os.path.relpath(asset_path, output_folder).replace("\\", "/")
+            caption = asset.get("caption") or asset.get("type", "Asset").title()
+            md.append(f"![{caption}]({rel_asset_path})")
+            md.append(f"*{caption}*")
 
         md.append("\n---\n")
 

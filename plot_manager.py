@@ -6,6 +6,14 @@ import re
 import math
 import numpy as np
 
+from typing import List
+
+from plotinator.engine.geometries import (
+    GeometryScript,
+    GeometryValidationError,
+    get_geometry,
+)
+
 PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
                       re.MULTILINE)
 
@@ -118,78 +126,44 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
 
 
 def generate_gnuplot_code(
-    cfg: dict, out_plot: str | None, out_residuals: str | None = None
-) -> str:
+    cfg: dict,
+    out_plot: str | None,
+    out_residuals: str | None = None,
+    *,
+    plot_dir: str | None = None,
+) -> List[GeometryScript]:
+    geometry_key = cfg.get("geometry", "line")
+    geometry = get_geometry(geometry_key)
+
     style = cfg.get("style", {})
-    pt  = style.get("point_type", 7)
-    lw  = style.get("line_width", 2)
-    col = style.get("line_color", "black")
+    options = cfg.get("geometry_options", {})
 
-    formula  = cfg["fit_formula"]
-    params   = cfg["fit_params"]
-    params_csv = ",".join(params)
-    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
-    use_err  = cfg.get("error_bars", False)
-
-    # Compute smart initial guesses
-    guesses = estimate_initial_params(datafile, formula, params)
-    overrides = cfg.get("initial_params") or {}
-    for key, value in overrides.items():
-        if key in guesses:
-            guesses[key] = value
-    init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
-    prints = "\n".join([
-       f'if (exists("{p}_err")) {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
-       f'}} else {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
-       for p in params
-    ])
-
-
-    code = f"""
-set encoding utf8
-set terminal pngcairo size 800,600
-set title "{cfg['title']}"
-set xlabel "X"
-set ylabel "Y"
-
-set fit errorvariables
-{init_lines}
-
-f(x) = {formula}
-fit f(x) "{datafile}" via {params_csv}
-
-{prints}
-
-"""
-    if out_plot:
-        code += f"set output \"{out_plot}\"\n"
-        if use_err:
-            code += (
-                f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
-                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+    cfg_copy = dict(cfg)
+    if geometry.requires_fit:
+        guesses = dict(cfg_copy.get("initial_guesses") or {})
+        if not guesses and cfg_copy.get("fit_params"):
+            guesses = estimate_initial_params(
+                cfg_copy["datafile"],
+                cfg_copy["fit_formula"],
+                cfg_copy.get("fit_params", []),
             )
-        else:
-            code += (
-                f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
-                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
-            )
-        code += "unset output\n"
+        cfg_copy["initial_guesses"] = guesses
 
-    # Optional residuals
-    if out_residuals:
-        code += f"""
-set output "{out_residuals}"
-set title "Residuals — {cfg['title']}"
-set xlabel "X"
-set ylabel "Residual (y - f(x))"
-set grid back
-plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
-     0 with lines notitle lc rgb "gray"
-unset output
-"""
-    return code
+    if plot_dir is None:
+        candidate = out_plot or out_residuals or cfg_copy.get("datafile", "")
+        plot_dir = (
+            os.path.dirname(os.path.abspath(candidate)) if candidate else os.getcwd()
+        )
+
+    scripts = geometry.build_scripts(
+        cfg_copy,
+        style,
+        options,
+        out_plot=out_plot,
+        out_residuals=out_residuals,
+        plot_dir=plot_dir,
+    )
+    return scripts
 
 
 BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
@@ -217,17 +191,27 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     base_dir = os.path.dirname(os.path.abspath(config_path))
     normalized: list[dict] = []
     for fit in fits:
-        formula = fit.get("formula") or fit.get("fit_formula") or "a*x + b"
-        params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
-        params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
-        if not params:
-            raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+        title = fit.get("title", "Untitled")
+        geometry_key = (fit.get("geometry") or "line").lower()
+        try:
+            geometry = get_geometry(geometry_key)
+        except GeometryValidationError as exc:
+            raise GeometryValidationError(
+                f"Fit '{title}' references unknown geometry '{geometry_key}'"
+            ) from exc
+
+        raw_options = dict(fit.get("geometry_options") or {})
+        if "error_bars" not in raw_options and "error_bars" in fit:
+            raw_options["error_bars"] = fit.get("error_bars")
+        options = geometry.normalize_options(raw_options)
 
         datafile = fit.get("datafile") or ""
         if datafile and not os.path.isabs(datafile):
             datafile = os.path.abspath(os.path.join(base_dir, datafile))
         if not datafile or not os.path.exists(datafile):
-            raise FileNotFoundError(f"Data file not found for fit '{fit.get('title', 'Untitled')}': {datafile}")
+            raise FileNotFoundError(
+                f"Data file not found for fit '{title}': {datafile}"
+            )
 
         style = fit.get("style", {}).copy()
         if "color" in fit and fit["color"]:
@@ -235,27 +219,54 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         elif "line_color" not in style:
             style["line_color"] = "#1f77b4"
 
-        initial_params = {}
-        for key in params:
-            try:
-                initial_params[key] = float(params_dict.get(key, ""))
-            except (TypeError, ValueError, AttributeError):
-                continue
+        residuals = bool(fit.get("residuals", True)) if geometry.supports_residuals else False
+
+        formula = fit.get("formula") or fit.get("fit_formula")
+        if geometry.requires_fit:
+            if not (formula and formula.strip()):
+                raise ValueError(
+                    f"Fit '{title}' requires a formula for geometry '{geometry.label}'."
+                )
+            params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
+            fit_params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
+            if not fit_params:
+                raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+
+            initial_params: dict[str, float] = {}
+            for key in fit_params:
+                try:
+                    initial_params[key] = float(params_dict.get(key, ""))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+
+            initial_guesses = estimate_initial_params(datafile, formula, fit_params)
+        else:
+            formula = formula or ""
+            fit_params = []
+            initial_params = {}
+            initial_guesses = {}
 
         normalized.append(
             {
-                "title": fit.get("title", "Untitled"),
+                "title": title,
+                "geometry": geometry.key,
+                "geometry_options": options,
+                "geometry_label": geometry.label,
                 "fit_formula": formula,
                 "datafile": datafile,
-                "residuals": bool(fit.get("residuals", True)),
+                "residuals": residuals and geometry.requires_fit,
                 "style": style,
-                "fit_params": params,
+                "fit_params": fit_params,
                 "initial_params": initial_params,
-                "error_bars": bool(fit.get("error_bars", False)),
+                "initial_guesses": initial_guesses,
+                "error_bars": bool(options.get("error_bars", False)),
             }
         )
 
     return normalized
+
+
+
 
 
 # ---------- main ----------
@@ -266,40 +277,74 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
     import os
 
+    geometry = get_geometry(plot_cfg.get("geometry", "line"))
     safe_title = plot_cfg["title"].replace(" ", "_")
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
 
     out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
+    residuals_enabled = (
+        geometry.supports_residuals
+        and geometry.requires_fit
+        and bool(plot_cfg.get("residuals", True))
+    )
+    residuals_path = (
+        os.path.join(plot_dir, "residuals.png").replace("\\", "/")
+        if residuals_enabled
+        else None
+    )
 
-    # --- Main fit ---
-    main_code = generate_gnuplot_code(plot_cfg, out_plot)
-    output_text = run_gnuplot_script(main_code, workdir=plot_dir)
-    params = parse_fit_output(output_text)
+    scripts = generate_gnuplot_code(
+        plot_cfg,
+        out_plot=out_plot,
+        out_residuals=residuals_path,
+        plot_dir=plot_dir,
+    )
 
-    # --- Optional residuals ---
-    if params and plot_cfg.get("residuals", True):
-        residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
-        metrics = compute_residual_metrics(plot_cfg["datafile"], params, plot_cfg["fit_formula"])
-        resid_code = generate_gnuplot_code(plot_cfg, out_plot=None, out_residuals=residuals_path)
-        run_gnuplot_script(resid_code, workdir=plot_dir)
-    else:
-        residuals_path = None
-        metrics = None
+    params: dict = {}
+    produced_residual: str | None = None
+    extras: list[dict] = []
 
-    # --- Package result ---
+    for script in scripts:
+        output_text = run_gnuplot_script(script.code, workdir=plot_dir)
+        if script.collect_parameters:
+            params = parse_fit_output(output_text)
+        if script.kind == "residual":
+            produced_residual = script.output
+        elif script.kind == "extra" and script.output:
+            extras.append(
+                {
+                    "type": script.asset_type,
+                    "path": script.output,
+                    "caption": script.caption or script.asset_type.title(),
+                }
+            )
+
+    metrics = None
+    if geometry.requires_fit and params:
+        metrics = compute_residual_metrics(
+            plot_cfg["datafile"], params, plot_cfg["fit_formula"]
+        )
+
     result = {
         "title": plot_cfg["title"],
         "formula": plot_cfg["fit_formula"],
         "parameters": params,
         "metrics": metrics,
         "datafile": plot_cfg["datafile"],
-        "output_plot": out_plot,
-        "residuals_plot": residuals_path,
+        "output_plot": out_plot if scripts else None,
+        "residuals_plot": produced_residual if produced_residual else None,
+        "geometry": plot_cfg.get("geometry"),
+        "geometry_label": plot_cfg.get("geometry_label", geometry.label),
+        "geometry_options": plot_cfg.get("geometry_options", {}),
+        "extra_assets": extras,
     }
 
-    print(f"[OK] Finished: {plot_cfg['title']}")
+    print(f"[OK] Finished: {plot_cfg['title']} ({geometry.label})")
     return result
+
+
+
 
 
 def main():
