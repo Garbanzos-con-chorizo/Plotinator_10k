@@ -35,6 +35,7 @@ class PlotinatorApp(ttkb.Window):
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
         self.runner_thread: threading.Thread | None = None
+        self._stop_log = threading.Event()
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
         self._progress_completed = 0
@@ -559,6 +560,7 @@ class DatasetDialog(ttkb.Toplevel):
         self.log_text.delete("1.0", tk.END)
         self._progress_total = 0
         self._progress_completed = 0
+        self._stop_log.clear()
         self._event_queue = queue.Queue()
 
         def _push_event(event: dict[str, Any]) -> None:
@@ -566,6 +568,7 @@ class DatasetDialog(ttkb.Toplevel):
                 self._event_queue.put(event)
 
         def _runner() -> None:
+            process: subprocess.Popen[str] | None = None
             script_path = Path(__file__).resolve().with_name("plot_manager.py")
             cmd = [sys.executable, str(script_path), str(self.config_path)]
             try:
@@ -579,15 +582,18 @@ class DatasetDialog(ttkb.Toplevel):
                 )
             except OSError as exc:
                 self._append_log(f"Failed to start {script_path}: {exc}\n")
-                return
-
-            for line in process.stdout:
-                if self._stop_log.is_set():
-                    break
-                self._append_log(line)
-            process.wait()
-            self.progress.configure(value=100)
-            self._append_log("\n[DONE] Batch finished.\n")
+            else:
+                assert process.stdout is not None
+                for line in process.stdout:
+                    if self._stop_log.is_set():
+                        break
+                    self._append_log(line)
+                process.wait()
+                self.progress.configure(value=100)
+                self._append_log("\n[DONE] Batch finished.\n")
+            finally:
+                self._stop_log.set()
+                self.runner_thread = None
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
         self.runner_thread.start()
@@ -606,6 +612,23 @@ class DatasetDialog(ttkb.Toplevel):
 
         if self._event_queue is not None:
             self.after(100, self._poll_events)
+
+    # ------------------------------------------------------------------
+    def _stop_runner_thread(self) -> None:
+        """Signal the log reader to stop and wait for the worker to finish."""
+
+        self._stop_log.set()
+        thread = self.runner_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+        self.runner_thread = None
+        self._event_queue = None
+
+    # ------------------------------------------------------------------
+    def stop_batch(self) -> None:
+        """Public helper for stop controls to shut down the batch thread."""
+
+        self._stop_runner_thread()
 
     # ------------------------------------------------------------------
     def _handle_engine_event(self, event: dict[str, Any]) -> None:
@@ -748,6 +771,11 @@ class DatasetDialog(ttkb.Toplevel):
         y = self.winfo_rooty() + self.winfo_height() - 100
         toast.geometry(f"240x60+{x}+{y}")
         toast.after(2500, toast.destroy)
+
+    # ------------------------------------------------------------------
+    def destroy(self) -> None:  # type: ignore[override]
+        self._stop_runner_thread()
+        super().destroy()
 
 
 def main() -> int:
