@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import datetime
+import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,6 +14,7 @@ from reports.pdf_exporter import export_pdf
 from pathlib import Path
 
 from config import ConfigError, load_config_file
+from .config import normalize_plots
 from .data_pipeline import prepare_datafile
 from .script_builder import (
     compute_residual_metrics,
