@@ -74,6 +74,44 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
                 f"Mean = {metrics['mean']:.4g} Std = {metrics['std']:.4g} RMSE = {metrics['rmse']:.4g}\n"
             )
 
+        data_source = item.get("data_source") or {}
+        if data_source:
+            md.append("\n**Data Source:**")
+            source_path = data_source.get("path", "")
+            if source_path:
+                md.append(f"- Path: `{source_path}`")
+            columns = data_source.get("columns") or {}
+            if columns:
+                base_cols = []
+                if columns.get("x"):
+                    base_cols.append(f"x → col {columns['x']}")
+                if columns.get("y"):
+                    base_cols.append(f"y → col {columns['y']}")
+                if base_cols:
+                    md.append(f"- Columns: {', '.join(base_cols)}")
+                if columns.get("error"):
+                    md.append(f"- Error column: col {columns['error']}")
+                if columns.get("weight"):
+                    md.append(f"- Weight column: col {columns['weight']}")
+            before = data_source.get("rows_before")
+            after = data_source.get("rows_after")
+            if before is not None and after is not None:
+                md.append(f"- Rows: {after} / {before} used after preprocessing")
+            preprocessing = data_source.get("preprocessing") or []
+            if preprocessing:
+                md.append("- Preprocessing steps:")
+                for step in preprocessing:
+                    if step.get("type") == "filter":
+                        info = step.get("retained_rows")
+                        suffix = f" → {info} rows" if info is not None else ""
+                        md.append(f"  - Filter `{step['expression']}`{suffix}")
+                    else:
+                        md.append(f"  - Transform `{step['target']}` := `{step['expression']}`")
+
+        confidence = item.get("confidence_notes")
+        if confidence:
+            md.append(f"\n> {confidence}")
+
         # Images
         plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
         res_path = item.get("residuals_plot")

@@ -3,26 +3,40 @@
         {
             "title": "Linear Fit Example",
             "formula": "a*x + b",
-            "datafile": "data/sample1.dat",
             "residuals": true,
-            "color": "blue"
+            "color": "blue",
+            "data_source": {
+                "path": "data/sample1.dat",
+                "columns": {"x": 1, "y": 2, "error": 3},
+                "preprocessing": []
+            }
         },
         {
             "title": "Exponential Fit Example",
             "formula": "A * exp(B * x)",
-            "datafile": "data/sample2.dat",
             "residuals": false,
-            "color": "red"
+            "color": "red",
+            "data_source": {
+                "path": "data/sample2.dat",
+                "columns": {"x": 1, "y": 2, "weight": 4},
+                "preprocessing": [
+                    {"type": "filter", "expression": "col2 > 0"}
+                ]
+            }
         },
         {
             "title": "New Fit",
             "formula": "a*x + b",
-            "datafile": "data/sample3.dat",
             "residuals": true,
             "color": "#1f77b4",
             "parameters": {
                 "a": 1.0,
                 "b": 1.0
+            },
+            "data_source": {
+                "path": "data/sample3.dat",
+                "columns": {"x": 1, "y": 2},
+                "preprocessing": []
             }
         }
     ]

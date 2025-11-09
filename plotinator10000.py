@@ -143,6 +143,9 @@ class PlotinatorApp(ttkb.Window):
             # Unknown schema; keep default empty fits and warn
             self.show_toast("Config warning", "config.json has no 'fits' or 'plots'. Starting with an empty list.",level="warning")
 
+        for fit in self.config_data.get("fits", []):
+            self._ensure_data_source(fit)
+
         self.refresh_table()
 
     def save_config(self):
@@ -150,15 +153,56 @@ class PlotinatorApp(ttkb.Window):
             json.dump(self.config_data, f, indent=4)
         self.show_toast("💾 Configuration saved successfully", level="success")
 
+    def _ensure_data_source(self, fit: dict) -> dict:
+        data_source = fit.setdefault("data_source", {})
+        if "path" not in data_source:
+            data_source["path"] = fit.get("datafile", "")
+
+        columns = data_source.get("columns")
+        if not isinstance(columns, dict):
+            columns = {}
+
+        def parse_col(value, default=None):
+            if value in (None, ""):
+                return default
+            try:
+                ivalue = int(value)
+            except (TypeError, ValueError):
+                return default
+            return ivalue if ivalue > 0 else default
+
+        columns = {
+            "x": parse_col(columns.get("x"), 1),
+            "y": parse_col(columns.get("y"), 2),
+            "error": parse_col(columns.get("error")),
+            "weight": parse_col(columns.get("weight")),
+        }
+        if columns["x"] is None:
+            columns["x"] = 1
+        if columns["y"] is None:
+            columns["y"] = 2
+        data_source["columns"] = columns
+
+        preprocessing = data_source.get("preprocessing")
+        if isinstance(preprocessing, list):
+            data_source["preprocessing"] = preprocessing
+        else:
+            data_source["preprocessing"] = []
+
+        # maintain compatibility for legacy fields
+        fit["datafile"] = data_source.get("path", "")
+        return data_source
+
     def refresh_table(self):
         for i in self.tree.get_children():
             self.tree.delete(i)
 
         fits = self.config_data.get("fits", [])
         for fit in fits:
+            data_source = self._ensure_data_source(fit)
             title = fit.get("title", "")
             formula = fit.get("formula", "")
-            datafile = os.path.basename(fit.get("datafile", ""))  # cleaner filename only
+            datafile = os.path.basename(data_source.get("path", ""))  # cleaner filename only
             residuals = "✅" if fit.get("residuals", False) else "❌"
             self.tree.insert("", "end", values=(title, formula, datafile, residuals))
 
@@ -249,7 +293,12 @@ class PlotinatorApp(ttkb.Window):
             "datafile": "",
             "residuals": True,
             "color": "#1f77b4",
-            "parameters": {"a": 1.0, "b": 1.0}
+            "parameters": {"a": 1.0, "b": 1.0},
+            "data_source": {
+                "path": "",
+                "columns": {"x": 1, "y": 2, "error": None, "weight": None},
+                "preprocessing": [],
+            },
         }
         self.config_data.setdefault("fits", []).append(new_fit)
         index = len(self.config_data["fits"]) - 1
@@ -278,6 +327,7 @@ class PlotinatorApp(ttkb.Window):
     def edit_fit(self, index):
         """Open the edit window for a specific fit index."""
         fit = self.config_data["fits"][index]
+        data_source = self._ensure_data_source(fit)
         edit_win = tk.Toplevel(self)
         edit_win.title(f"Edit Fit #{index + 1}")
         edit_win.geometry("600x600")
@@ -321,7 +371,7 @@ class PlotinatorApp(ttkb.Window):
 
         # --- Data file
         tk.Label(scrollable_frame, text="Data file:").pack(anchor="w", padx=10, pady=2)
-        data_var = tk.StringVar(value=fit.get("datafile", ""))
+        data_var = tk.StringVar(value=data_source.get("path", ""))
 
         def browse_file():
             file_path = filedialog.askopenfilename(
@@ -342,6 +392,7 @@ class PlotinatorApp(ttkb.Window):
                 if os.path.samefile(file_path, dest_path):
                     rel_path = f"data/{os.path.basename(dest_path)}"
                     data_var.set(rel_path)
+                    data_source["path"] = rel_path
                     fit["datafile"] = rel_path
                     self.show_toast(f"📄 Using existing file: {os.path.basename(dest_path)}", level="info")
                     return
@@ -349,6 +400,7 @@ class PlotinatorApp(ttkb.Window):
                 shutil.copy(file_path, dest_path)
                 rel_path = f"data/{os.path.basename(dest_path)}"
                 data_var.set(rel_path)
+                data_source["path"] = rel_path
                 fit["datafile"] = rel_path
                 self.show_toast(f"📂 Imported {os.path.basename(dest_path)}", level="success")
 
@@ -418,20 +470,93 @@ class PlotinatorApp(ttkb.Window):
         # Automatically refresh when formula changes
         formula_var.trace_add("write", lambda *_: refresh_parameters())
 
+        # --- Column mapping ---
+        tk.Label(scrollable_frame, text="Columns (1-based):").pack(anchor="w", padx=10, pady=(10, 0))
+        cols_frame = tk.Frame(scrollable_frame)
+        cols_frame.pack(fill="x", padx=10)
+
+        x_col_var = tk.StringVar(value=str(data_source.get("columns", {}).get("x", 1)))
+        y_col_var = tk.StringVar(value=str(data_source.get("columns", {}).get("y", 2)))
+        err_col = data_source.get("columns", {}).get("error")
+        weight_col = data_source.get("columns", {}).get("weight")
+        err_col_var = tk.StringVar(value="" if err_col is None else str(err_col))
+        weight_col_var = tk.StringVar(value="" if weight_col is None else str(weight_col))
+
+        for label, var in [("X", x_col_var), ("Y", y_col_var), ("Error", err_col_var), ("Weight", weight_col_var)]:
+            frame_col = tk.Frame(cols_frame)
+            frame_col.pack(fill="x", pady=2)
+            tk.Label(frame_col, text=f"{label} column:").pack(side="left")
+            tk.Entry(frame_col, textvariable=var, width=6).pack(side="left", padx=5)
+
+        # --- Preprocessing ---
+        tk.Label(scrollable_frame, text="Preprocessing (JSON list):").pack(anchor="w", padx=10, pady=(10, 0))
+        preproc_text = tk.Text(scrollable_frame, height=6, width=40)
+        existing_steps = data_source.get("preprocessing", [])
+        if existing_steps:
+            preproc_text.insert("1.0", json.dumps(existing_steps, indent=2))
+        preproc_text.pack(fill="x", padx=10, pady=5)
+
 
         # --- Save button
         tk.Label(scrollable_frame, text=" ").pack()  # spacer before Save button
         def save_and_close():
             fit["title"] = title_var.get()
             fit["formula"] = formula_var.get()
-            fit["datafile"] = data_var.get()
+            data_path = data_var.get()
+            fit["datafile"] = data_path
+            data_source["path"] = data_path
             fit["residuals"] = residuals_var.get()
             fit["color"] = color_var.get()
+            fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
+
+            def parse_column(value, required=False, default=None):
+                text = value.strip()
+                if not text:
+                    if required and default is None:
+                        raise ValueError("Column is required")
+                    return default
+                ivalue = int(text)
+                if ivalue <= 0:
+                    raise ValueError("Column must be positive")
+                return ivalue
+
+            try:
+                columns = {
+                    "x": parse_column(x_col_var.get(), required=True, default=1),
+                    "y": parse_column(y_col_var.get(), required=True, default=2),
+                    "error": parse_column(err_col_var.get(), required=False, default=None),
+                    "weight": parse_column(weight_col_var.get(), required=False, default=None),
+                }
+            except (ValueError, TypeError) as exc:
+                self.show_toast(f"Invalid column entry: {exc}", level="error")
+                return
+
+            data_source["columns"] = columns
+
+            preproc_raw = preproc_text.get("1.0", "end").strip()
+            if preproc_raw:
+                try:
+                    steps = json.loads(preproc_raw)
+                    if not isinstance(steps, list):
+                        raise ValueError("Preprocessing must be a list of steps")
+                    for step in steps:
+                        if not isinstance(step, dict):
+                            raise ValueError("Each preprocessing step must be an object")
+                        if "type" not in step or "expression" not in step:
+                            raise ValueError("Steps require 'type' and 'expression'")
+                        if step.get("type") == "transform" and "target" not in step:
+                            raise ValueError("Transform steps require a 'target'")
+                except Exception as exc:
+                    self.show_toast(f"Preprocessing parse error: {exc}", level="error")
+                    return
+            else:
+                steps = []
+            data_source["preprocessing"] = steps
+
             self.save_config()
             self.refresh_table()
             self.show_toast(f"Saved '{fit['title']}'", level="info")
             edit_win.destroy()
-            fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
 
 
         tk.Button(scrollable_frame, text="💾 Save", command=save_and_close, bg="#4CAF50", fg="white").pack(pady=15)
