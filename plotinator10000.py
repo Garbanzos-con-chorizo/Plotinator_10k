@@ -609,19 +609,27 @@ class DatasetDialog(ttkb.Toplevel):
     def _poll_events(self) -> None:
         if self._event_queue is None:
             return
-        try:
-            while True:
-                event = self._event_queue.get_nowait()
-                self._handle_engine_event(event)
-        except queue.Empty:
-            pass
 
-        if self._event_queue is not None:
-            runner = self.runner_thread
-            if (runner is None or not runner.is_alive()) and self._event_queue.empty():
-                self._event_queue = None
-                return
-            self.after(100, self._poll_events)
+        try:
+            event = self._event_queue.get_nowait()
+        except queue.Empty:
+            event = None
+        else:
+            self._handle_engine_event(event)
+
+        if self._event_queue is None:
+            return
+
+        if event is not None and not self._event_queue.empty():
+            self.after(0, self._poll_events)
+            return
+
+        runner = self.runner_thread
+        if (runner is None or not runner.is_alive()) and self._event_queue.empty():
+            self._event_queue = None
+            return
+
+        self.after(100, self._poll_events)
 
     # ------------------------------------------------------------------
     def _stop_runner_thread(self) -> None:
@@ -721,6 +729,7 @@ class DatasetDialog(ttkb.Toplevel):
             return
 
         if etype == "job-complete":
+            self._progress_completed = self._progress_total or self._progress_completed
             self.progress.configure(value=100)
             results_path = event.get("results_path")
             if results_path:
@@ -730,6 +739,7 @@ class DatasetDialog(ttkb.Toplevel):
                 self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
             self._set_status("Batch complete")
+            self._event_queue = None
             return
 
         if etype == "job-error":
@@ -737,7 +747,8 @@ class DatasetDialog(ttkb.Toplevel):
             self._append_log(f"[X] {error_msg}\n")
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
-            self._set_status("Batch failed")
+            self._set_status(f"Batch failed: {error_msg}")
+            self._event_queue = None
             return
 
         if etype == "job-exception":
@@ -745,7 +756,8 @@ class DatasetDialog(ttkb.Toplevel):
             self._append_log(f"[X] {error_msg}\n")
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
-            self._set_status("Batch failed")
+            self._set_status(f"Batch failed: {error_msg}")
+            self._event_queue = None
             return
 
     # ------------------------------------------------------------------
