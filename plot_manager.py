@@ -6,6 +6,8 @@ import re
 import math
 import numpy as np
 
+from plotinator.config.style import StyleConfig
+
 PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
                       re.MULTILINE)
 
@@ -120,30 +122,68 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
 def generate_gnuplot_code(
     cfg: dict, out_plot: str | None, out_residuals: str | None = None
 ) -> str:
-    style = cfg.get("style", {})
-    formula  = cfg["fit_formula"]
-    params   = cfg["fit_params"]
-    params_csv = ",".join(params)
-    datasets = cfg.get("datasets", [])
-    if not datasets:
-        raise ValueError("At least one dataset must be defined for each fit")
+    raw_style = cfg.get("style_model") or cfg.get("style")
+    style_cfg = (
+        raw_style
+        if isinstance(raw_style, StyleConfig)
+        else StyleConfig.from_dict(raw_style, fallback_color=cfg.get("color"))
+    )
 
-    dataset_index = 0
-    fit_dataset_id = cfg.get("fit_dataset")
-    if fit_dataset_id:
-        for idx, ds in enumerate(datasets):
-            if ds.get("id") == fit_dataset_id:
-                dataset_index = idx
-                break
-    primary_dataset = datasets[dataset_index]
-    residual_dataset = primary_dataset
-    residual_dataset_id = cfg.get("residual_dataset")
-    if residual_dataset_id:
-        for ds in datasets:
-            if ds.get("id") == residual_dataset_id:
-                residual_dataset = ds
-                break
-    datafile = os.path.abspath(primary_dataset["datafile"]).replace("\\", "/")
+    pt = style_cfg.point_type
+    lw = style_cfg.line_width
+    col = style_cfg.line_color
+
+    formula = cfg["fit_formula"]
+    params = cfg["fit_params"]
+    params_csv = ",".join(params)
+    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
+    use_err = cfg.get("error_bars", False)
+
+    def _escape(text: str) -> str:
+        return (text or "").replace("\\", "\\\\").replace('"', '\"')
+
+    def _style_commands(title: str, x_label: str, y_label: str, *, force_linear_y: bool = False) -> str:
+        lines: list[str] = [
+            "set encoding utf8",
+            f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\"",
+            f"set title \"{_escape(title)}\" font \",{style_cfg.title_font_size}\"",
+            f"set xlabel \"{_escape(x_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set ylabel \"{_escape(y_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set xtics font \",{style_cfg.tick_font_size}\"",
+            f"set ytics font \",{style_cfg.tick_font_size}\"",
+        ]
+
+        if style_cfg.x_scale == "log":
+            lines.append("set logscale x")
+        else:
+            lines.append("unset logscale x")
+
+        if not force_linear_y and style_cfg.y_scale == "log":
+            lines.append("set logscale y")
+        else:
+            lines.append("unset logscale y")
+
+        if style_cfg.x_tick_format:
+            lines.append(f"set format x \"{_escape(style_cfg.x_tick_format)}\"")
+        else:
+            lines.append("set format x")
+
+        if style_cfg.y_tick_format and not force_linear_y:
+            lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
+        else:
+            lines.append("set format y")
+
+        if style_cfg.grid:
+            lines.append(f"set grid {style_cfg.grid_layer}")
+        else:
+            lines.append("unset grid")
+
+        if style_cfg.legend_visible and not force_linear_y:
+            lines.append(style_cfg.legend_gnuplot_clause())
+        else:
+            lines.append("unset key")
+
+        return "\n".join(lines)
 
     # Compute smart initial guesses
     guesses = estimate_initial_params(datafile, formula, params)
@@ -161,32 +201,9 @@ def generate_gnuplot_code(
     ])
 
 
-    layout = cfg.get("layout", {})
-    rows = max(1, int(layout.get("rows", 1)))
-    cols = max(1, int(layout.get("columns", 1)))
-    share_x = bool(layout.get("share_x", False))
-    share_y = bool(layout.get("share_y", False))
-    show_legend = bool(layout.get("show_legend", True))
-    panes = layout.get("panes", [])
-    if not panes:
-        panes = [{"id": "main", "title": cfg["title"], "legend": True, "residuals": False, "show_fit": True}]
-
-    pane_count = len(panes)
-    max_slots = rows * cols
-    if pane_count > max_slots:
-        rows = math.ceil(pane_count / cols)
-        max_slots = rows * cols
-    if pane_count < max_slots:
-        # Keep rows/cols but gnuplot will simply leave blanks; no action needed
-        pass
-
-    fit_style = style
-    width = 800 * cols
-    height = 600 * rows
-
     code = f"""
-set encoding utf8
-set terminal pngcairo size {width},{height}
+{_style_commands(cfg['title'], style_cfg.axis_label_with_unit('x'), style_cfg.axis_label_with_unit('y'))}
+
 set fit errorvariables
 {init_lines}
 
@@ -199,94 +216,27 @@ fit f(x) "{datafile}" via {params_csv}
 
     if out_plot:
         code += f"set output \"{out_plot}\"\n"
-        code += f"set multiplot layout {rows},{cols} title \"{cfg['title']}\"\n"
+        if use_err:
+            code += (
+                f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
+                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+            )
+        else:
+            code += (
+                f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
+                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+            )
+        code += "unset output\n"
 
-        for idx, pane in enumerate(panes):
-            pane_title = pane.get("title") or cfg["title"]
-            legend_on = show_legend and pane.get("legend", True)
-            show_fit_line = pane.get("show_fit", not pane.get("residuals", False))
-            is_residual = pane.get("residuals", False)
-            xlabel = pane.get("xlabel") or ("X" if not (share_x and idx < (pane_count - cols)) else "")
-            ylabel = pane.get("ylabel") or ("Y" if not (share_y and (idx % cols) != 0) else "")
-
-            code += f"set title \"{pane_title}\"\n"
-            if legend_on:
-                code += "set key inside\n"
-            else:
-                code += "unset key\n"
-
-            if share_x and idx < (pane_count - cols):
-                code += "set xlabel \"\"\nset format x \"\"\n"
-            else:
-                code += f"set xlabel \"{xlabel}\"\nset format x default\n"
-
-            if share_y and (idx % cols) != 0:
-                code += "set ylabel \"\"\nset format y \"\"\n"
-            else:
-                code += f"set ylabel \"{ylabel}\"\nset format y default\n"
-
-            pane_datasets = [ds for ds in datasets if (ds.get("pane") or "") == pane.get("id")]
-            if not pane_datasets and not is_residual:
-                pane_datasets = [primary_dataset]
-
-            plot_segments: list[str] = []
-
-            if is_residual:
-                if not cfg.get("residuals", True):
-                    code += "plot NaN notitle\n"
-                    continue
-                pt = residual_dataset.get("style", {}).get("point_type", style.get("point_type", 7))
-                color = residual_dataset.get("style", {}).get("line_color", style.get("line_color", "black"))
-                plot_segments.append(
-                    f"\"{residual_dataset['datafile']}\" using 1:($2 - f($1)) with points pt {pt} lc rgb \"{color}\" title \"Residuals\""
-                )
-                plot_segments.append("0 with lines notitle lc rgb \"gray\"")
-            else:
-                for ds in pane_datasets:
-                    ds_style = ds.get("style", {})
-                    mode = ds_style.get("mode", "linespoints")
-                    pt = ds_style.get("point_type")
-                    lw = ds_style.get("line_width")
-                    lc = ds_style.get("line_color", fit_style.get("line_color", "black"))
-                    if ds.get("error_bars"):
-                        segment = f"\"{ds['datafile']}\" using 1:2:3 with yerrorbars title \"{ds.get('label', ds['id'])}\""
-                    else:
-                        segment = f"\"{ds['datafile']}\" using 1:2 with {mode} title \"{ds.get('label', ds['id'])}\""
-                    if lw is not None:
-                        segment += f" lw {lw}"
-                    if lc:
-                        segment += f" lc rgb \"{lc}\""
-                    if pt is not None and "points" in mode:
-                        segment += f" pt {pt}"
-                    plot_segments.append(segment)
-                if show_fit_line:
-                    lw = fit_style.get("line_width", 2)
-                    col = fit_style.get("line_color", "black")
-                    plot_segments.append(
-                        f"f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
-                    )
-
-            if plot_segments:
-                joined = ", \\\n+    ".join(plot_segments)
-                code += f"plot {joined}\n"
-            else:
-                code += "plot NaN notitle\n"
-
-        code += "unset multiplot\nunset output\n"
-
+    # Optional residuals
     if out_residuals:
-        # Legacy hook kept for compatibility when residual-only rendering is requested
         code += f"""
 set output "{out_residuals}"
-set title "Residuals — {cfg['title']}"
-set xlabel "X"
-set ylabel "Residual (y - f(x))"
-set grid back
-plot "{residual_dataset['datafile']}" using 1:($2 - f($1)) with points pt {residual_dataset.get('style', {}).get('point_type', style.get('point_type', 7))} title "Residuals", \\
+{_style_commands(f"Residuals — {cfg['title']}", style_cfg.axis_label_with_unit('x'), "Residual (y - f(x))", force_linear_y=True)}
+plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
      0 with lines notitle lc rgb "gray"
 unset output
 """
-
     return code
 
 
@@ -326,11 +276,18 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         if not params:
             raise ValueError(f"Cannot infer parameters for formula '{formula}'")
 
-        style = fit.get("style", {}).copy()
-        if "color" in fit and fit["color"]:
-            style.setdefault("line_color", fit["color"])
-        elif "line_color" not in style:
-            style["line_color"] = "#1f77b4"
+        datafile = fit.get("datafile") or ""
+        if datafile and not os.path.isabs(datafile):
+            datafile = os.path.abspath(os.path.join(base_dir, datafile))
+        if not datafile or not os.path.exists(datafile):
+            raise FileNotFoundError(f"Data file not found for fit '{fit.get('title', 'Untitled')}': {datafile}")
+
+        style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
+        if fit.get("color"):
+            style_cfg.line_color = fit["color"]
+        else:
+            fit["color"] = style_cfg.line_color
+        style = style_cfg.to_dict()
 
         initial_params = {}
         for key in params:
@@ -490,6 +447,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                 "fit_formula": formula,
                 "residuals": bool(fit.get("residuals", True)),
                 "style": style,
+                "style_model": style_cfg,
                 "fit_params": params,
                 "initial_params": initial_params,
                 "datasets": datasets,
