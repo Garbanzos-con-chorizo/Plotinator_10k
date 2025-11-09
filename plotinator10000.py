@@ -4,18 +4,16 @@ import copy
 import json
 import os
 import queue
-import subprocess
-import sys
 import threading
 import tkinter as tk
 from typing import Any
 from pathlib import Path
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 
-from engine import run_job
+from engine import run_batch as engine_run_batch
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 
 CONFIG_PATH = "config.json"
@@ -40,6 +38,7 @@ class PlotinatorApp(ttkb.Window):
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
         self._progress_completed = 0
+        self.status_var = tk.StringVar(self, value="Idle")
 
         self._create_widgets()
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -75,6 +74,9 @@ class PlotinatorApp(ttkb.Window):
 
         progress_frame = ttkb.Frame(self, padding=(10, 0))
         progress_frame.pack(fill="x")
+        ttkb.Label(progress_frame, textvariable=self.status_var, anchor="w").pack(
+            fill="x", pady=(0, 6)
+        )
         self.progress = ttkb.Progressbar(progress_frame, mode="determinate", bootstyle="info-striped")
         self.progress.pack(fill="x")
 
@@ -563,9 +565,14 @@ class DatasetDialog(ttkb.Toplevel):
         self._progress_completed = 0
         self._stop_log.clear()
         self._event_queue = queue.Queue()
+        self._set_status("Launching batch…")
+
+        event_state = {"job_error": False}
 
         def _push_event(event: dict[str, Any]) -> None:
             if self._event_queue is not None:
+                if event.get("type") == "job-error":
+                    event_state["job_error"] = True
                 self._event_queue.put(event)
 
         def _runner() -> None:
@@ -666,11 +673,13 @@ class DatasetDialog(ttkb.Toplevel):
             self.progress.configure(value=0)
             ts = event.get("timestamp", "")
             self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
+            self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
             return
 
         if etype == "plot-start":
             title = event.get("title", "Untitled")
             self._append_log(f"[RUN] Processing: {title}\n")
+            self._set_status(f"Processing plot: {title}")
             return
 
         if etype == "plot-complete":
@@ -678,6 +687,10 @@ class DatasetDialog(ttkb.Toplevel):
             self._update_progress_bar()
             title = event.get("title", "Untitled")
             self._append_log(f"[OK] Finished: {title}\n")
+            total_display = self._progress_total if self._progress_total else "?"
+            self._set_status(
+                f"Completed {self._progress_completed}/{total_display}: {title}"
+            )
             return
 
         if etype == "plot-error":
@@ -687,12 +700,14 @@ class DatasetDialog(ttkb.Toplevel):
             error_msg = event.get("error", "Unknown error")
             self._append_log(f"[X] Error in {title}: {error_msg}\n")
             self.show_toast(f"Plot failed: {title}", level="error")
+            self._set_status(f"Plot error: {title}")
             return
 
         if etype == "report-markdown-ready":
             md_path = event.get("markdown_path", "")
             if md_path:
                 self._append_log(f"[REPORT] Markdown saved to: {md_path}\n")
+            self._set_status("Report markdown generated")
             return
 
         if etype == "report-exported":
@@ -700,6 +715,7 @@ class DatasetDialog(ttkb.Toplevel):
             if pdf_path:
                 self._append_log(f"[REPORT] PDF exported to: {pdf_path}\n")
             self.show_toast("Report exported", level="success")
+            self._set_status("Report exported")
             return
 
         if etype == "report-error":
@@ -707,6 +723,7 @@ class DatasetDialog(ttkb.Toplevel):
             error_msg = event.get("error", "Unknown error")
             self._append_log(f"[WARN] Report {stage} failed: {error_msg}\n")
             self.show_toast("Report generation issue", level="warning")
+            self._set_status(f"Report {stage} failed")
             return
 
         if etype == "job-complete":
@@ -718,12 +735,23 @@ class DatasetDialog(ttkb.Toplevel):
             if pdf_path:
                 self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
+            self._set_status("Batch complete")
             return
 
         if etype == "job-error":
             error_msg = event.get("error", "Batch failed")
             self._append_log(f"[X] {error_msg}\n")
             self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status("Batch failed")
+            return
+
+        if etype == "job-exception":
+            error_msg = event.get("error", "Batch failed")
+            self._append_log(f"[X] {error_msg}\n")
+            self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status("Batch failed")
             return
 
         if etype == "job-thread-exit":
@@ -738,6 +766,13 @@ class DatasetDialog(ttkb.Toplevel):
         else:
             percent = 0.0
         self.progress.configure(value=min(percent, 100))
+
+    # ------------------------------------------------------------------
+    def _set_status(self, text: str) -> None:
+        def _apply() -> None:
+            self.status_var.set(text)
+
+        self.after(0, _apply)
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
