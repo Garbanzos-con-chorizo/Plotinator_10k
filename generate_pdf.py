@@ -1,8 +1,9 @@
 import json
 import os
 import shutil
-
 import pypandoc
+
+from plotinator.engine.geometries import get_geometry
 
 PANDOC_ENV_VAR = "PANDOC_PATH"
 
@@ -52,18 +53,25 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
 
     for item in data.get("results", []):
         title = item["title"]
-        formula = item["formula"]
-        md.append(f"## {title}")
-        md.append(f"**Formula:** `{formula}`  ")
-        geometry_label = item.get("geometry_label") or item.get("geometry")
-        if geometry_label:
-            md.append(f"**Geometry:** {geometry_label}  ")
+        formula = item.get("formula", "")
+        geometry_name = (item.get("geometry") or "line")
+        try:
+            geometry_label = get_geometry(geometry_name).label
+        except KeyError:
+            geometry_label = geometry_name.title()
 
-        geometry_options = item.get("geometry_options") or {}
-        if geometry_options:
-            md.append("**Geometry Options:**")
-            for key, value in geometry_options.items():
-                md.append(f"- `{key}` = {value}")
+        md.append(f"## {title}")
+        if formula:
+            md.append(f"**Formula:** `{formula}`  ")
+        else:
+            md.append("**Formula:** _(not applicable)_  ")
+        md.append(f"**Geometry:** {geometry_label}  ")
+
+        options = item.get("geometry_options") or {}
+        if options:
+            md.append("**Geometry options:**")
+            for key in sorted(options):
+                md.append(f"- `{key}`: {options[key]}")
 
         # Parameters table
         params = item.get("parameters", {})
@@ -80,32 +88,30 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         metrics = item.get("metrics")
         if metrics:
             md.append(
-                f"\n**Residual Metrics:**  \n"
+                "\n**Residual Metrics:**  \n"
                 f"Mean = {metrics['mean']:.4g} Std = {metrics['std']:.4g} RMSE = {metrics['rmse']:.4g}\n"
             )
 
         # Images
-        plot_path = item.get("output_plot")
-        if plot_path:
-            rel_plot_path = os.path.relpath(plot_path, output_folder).replace("\\", "/")
-            md.append(f"![Plot]({rel_plot_path})")
+        plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
+        md.append(f"![Plot]({plot_path})")
 
         res_path = item.get("residuals_plot")
         if res_path:
             residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
             md.append(f"![Residuals]({residuals_path})")
 
-        for asset in item.get("extra_assets", []):
+        for asset in item.get("auxiliary_assets", []):
             asset_path = asset.get("path")
             if not asset_path:
                 continue
-            rel_asset_path = os.path.relpath(asset_path, output_folder).replace("\\", "/")
-            caption = asset.get("caption") or asset.get("type", "Asset").title()
-            md.append(f"![{caption}]({rel_asset_path})")
-            md.append(f"*{caption}*")
+            rel_asset = os.path.relpath(asset_path, output_folder).replace("\\", "/")
+            caption = asset.get("caption") or "Auxiliary view"
+            md.append(f"![{caption}]({rel_asset})")
+            if caption:
+                md.append(f"*{caption}*")
 
         md.append("\n---\n")
-
     markdown_text = "\n".join(md)
     md_file = os.path.join(output_folder, "report.md")
     with open(md_file, "w", encoding="utf-8") as f:

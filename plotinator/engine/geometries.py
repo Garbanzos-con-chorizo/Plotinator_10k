@@ -8,10 +8,8 @@ geometry.
 
 from __future__ import annotations
 
-import os
-
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 __all__ = [
     "GeometryOption",
@@ -38,45 +36,50 @@ class GeometryOption:
     default: Any = None
     required: bool = False
     min_value: Optional[float] = None
-    description: str = ""
+    max_value: Optional[float] = None
+    choices: Optional[Iterable[Any]] = None
+    help_text: str = ""
 
 
 @dataclass
 class GeometryScript:
-    """Container for a gnuplot script emitted by a geometry strategy."""
+    """Bundle of gnuplot commands for a geometry render."""
 
-    code: str
-    output: Optional[str]
-    kind: str = "primary"  # primary, residual, extra
-    caption: Optional[str] = None
-    asset_type: str = "plot"
-    collect_parameters: bool = False
+    main: str
+    residuals: Optional[str] = None
+    auxiliary: List[Tuple[str, str, str]] = field(default_factory=list)
+    # (script, output_path, caption)
 
 
-@dataclass
 class GeometryStrategy:
     """Base class for geometry behaviours."""
 
-    key: str
-    label: str
-    requires_fit: bool = True
-    supports_residuals: bool = True
-    options: Iterable[GeometryOption] = field(default_factory=list)
+    name: str = ""
+    label: str = ""
+    description: str = ""
+    options: List[GeometryOption] = []
+    supports_fit: bool = False
+    supports_residuals: bool = False
 
-    def normalize_options(self, options: Mapping[str, Any] | None) -> Dict[str, Any]:
-        """Validate and coerce option values."""
+    def validate(
+        self,
+        options: Optional[Mapping[str, Any]],
+        *,
+        data_columns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Validate and sanitize a geometry options payload."""
 
-        payload: Dict[str, Any] = {}
-        provided = dict(options or {})
+        sanitized: Dict[str, Any] = {}
+        payload = dict(options or {})
+
         for opt in self.options:
-            raw = provided.get(opt.name, opt.default)
+            raw = payload.get(opt.name, opt.default)
             if raw is None:
                 if opt.required:
                     raise GeometryValidationError(
-                        f"Missing required option '{opt.name}' for geometry '{self.key}'"
+                        f"Missing required option '{opt.label}' for geometry '{self.label}'"
                     )
-                else:
-                    continue
+                continue
 
             try:
                 if opt.kind == "int":
@@ -90,428 +93,374 @@ class GeometryStrategy:
                         value = bool(raw)
                 else:
                     value = str(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as exc:
                 raise GeometryValidationError(
-                    f"Option '{opt.name}' for geometry '{self.key}' must be a valid {opt.kind}"
-                ) from None
+                    f"Invalid value for option '{opt.label}': {raw!r}"
+                ) from exc
 
-            if opt.min_value is not None and isinstance(value, (int, float)):
-                if value < opt.min_value:
-                    raise GeometryValidationError(
-                        f"Option '{opt.name}' for geometry '{self.key}' must be >= {opt.min_value}"
-                    )
+            if opt.min_value is not None and value < opt.min_value:
+                raise GeometryValidationError(
+                    f"Option '{opt.label}' must be ≥ {opt.min_value}, got {value}"
+                )
+            if opt.max_value is not None and value > opt.max_value:
+                raise GeometryValidationError(
+                    f"Option '{opt.label}' must be ≤ {opt.max_value}, got {value}"
+                )
+            if opt.choices is not None and value not in opt.choices:
+                raise GeometryValidationError(
+                    f"Option '{opt.label}' must be one of {list(opt.choices)}, got {value}"
+                )
 
-            payload[opt.name] = value
+            sanitized[opt.name] = value
 
-        # Carry over unknown options unchanged to allow forwards compatibility.
-        for key, value in provided.items():
-            if key not in payload:
-                payload[key] = value
+        return self._post_validate(sanitized, data_columns=data_columns)
 
-        return payload
-
-    # --- gnuplot integration -------------------------------------------------
-    def build_scripts(
+    # ------------------------------------------------------------------
+    def _post_validate(
         self,
-        cfg: Mapping[str, Any],
-        style: Mapping[str, Any],
-        options: Mapping[str, Any],
+        options: Dict[str, Any],
         *,
+        data_columns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Hook for subclasses to implement extra validation rules."""
+
+        return options
+
+    # ------------------------------------------------------------------
+    def generate_gnuplot(
+        self,
+        plot_cfg: Mapping[str, Any],
         out_plot: Optional[str],
-        out_residuals: Optional[str],
-        plot_dir: str,
-    ) -> List[GeometryScript]:
+        out_residuals: Optional[str] = None,
+    ) -> GeometryScript:
         raise NotImplementedError
 
+    # ------------------------------------------------------------------
+    def generate_matplotlib(
+        self,
+        plot_cfg: Mapping[str, Any],
+    ) -> Optional[str]:
+        """Optional Matplotlib adapter (currently unused)."""
 
-# --- Registry ----------------------------------------------------------------
+        return None
 
-_GEOMETRY_REGISTRY: Dict[str, GeometryStrategy] = {}
+
+_REGISTRY: Dict[str, GeometryStrategy] = {}
 
 
 def register_geometry(strategy: GeometryStrategy) -> None:
-    key = strategy.key.lower()
-    if key in _GEOMETRY_REGISTRY:
-        raise ValueError(f"Geometry '{key}' is already registered")
-    _GEOMETRY_REGISTRY[key] = strategy
+    key = strategy.name.lower()
+    _REGISTRY[key] = strategy
 
 
-def get_geometry(key: str) -> GeometryStrategy:
+def get_geometry(name: str) -> GeometryStrategy:
     try:
-        return _GEOMETRY_REGISTRY[key.lower()]
-    except KeyError:
-        raise GeometryValidationError(f"Unknown geometry '{key}'") from None
+        return _REGISTRY[name.lower()]
+    except KeyError as exc:
+        raise KeyError(f"Unknown geometry '{name}'. Registered: {list(_REGISTRY)}") from exc
 
 
 def list_geometries() -> List[GeometryStrategy]:
-    return list(_GEOMETRY_REGISTRY.values())
+    return sorted(_REGISTRY.values(), key=lambda g: g.label.lower())
 
 
-# --- Strategy implementations -------------------------------------------------
+# ---------------------------------------------------------------------------
+# Concrete strategies
+# ---------------------------------------------------------------------------
 
-from math import ceil
+class LineFitGeometry(GeometryStrategy):
+    name = "line"
+    label = "Line / Curve Fit"
+    description = "Standard 2D fit with optional residuals."
+    options: List[GeometryOption] = []
+    supports_fit = True
+    supports_residuals = True
 
-
-def _sanitize_path(path: Optional[str]) -> Optional[str]:
-    if not path:
-        return None
-    return path.replace("\\", "/")
-
-
-class LineGeometry(GeometryStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            key="line",
-            label="Line Fit",
-            requires_fit=True,
-            supports_residuals=True,
-            options=[
-                GeometryOption(
-                    name="error_bars",
-                    label="Error bars",
-                    kind="bool",
-                    default=False,
-                    description="Use column 3 of the dataset as ±σ values.",
-                )
-            ],
-        )
-
-    def build_scripts(
+    def generate_gnuplot(
         self,
-        cfg: Mapping[str, Any],
-        style: Mapping[str, Any],
-        options: Mapping[str, Any],
-        *,
+        plot_cfg: Mapping[str, Any],
         out_plot: Optional[str],
-        out_residuals: Optional[str],
-        plot_dir: str,
-    ) -> List[GeometryScript]:
+        out_residuals: Optional[str] = None,
+    ) -> GeometryScript:
+        style = plot_cfg.get("style", {})
         pt = style.get("point_type", 7)
         lw = style.get("line_width", 2)
         col = style.get("line_color", "black")
 
-        formula = cfg["fit_formula"]
-        params = cfg.get("fit_params", [])
+        formula = plot_cfg["fit_formula"]
+        params = plot_cfg["fit_params"]
         params_csv = ",".join(params)
-        datafile = _sanitize_path(cfg["datafile"])
-        use_err = bool(options.get("error_bars"))
+        datafile = plot_cfg["datafile"].replace("\\", "/")
+        use_err = plot_cfg.get("error_bars", False)
 
-        guesses = dict(cfg.get("initial_guesses") or {})
-        if not guesses:
-            guesses = {p: 1.0 for p in params}
-        overrides = cfg.get("initial_params") or {}
+        overrides = plot_cfg.get("initial_params") or {}
+        guesses = dict(plot_cfg.get("computed_initials", {}))
         for key, value in overrides.items():
             if key in guesses:
                 guesses[key] = value
 
         init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
-        prints = "\n".join(
-            [
-                (
-                    "if (exists(\"{0}_err\")) {{ "
-                    "print sprintf(\"PYFIT %s %0.16g %0.16g\", \"{0}\", {0}, {0}_err) "
-                    "}} else {{ "
-                    "print sprintf(\"PYFIT %s %0.16g %0.16g\", \"{0}\", {0}, 0.0) }}"
-                ).format(p)
-                for p in params
-            ]
-        )
+        prints = "\n".join([
+            (
+                f'if (exists("{p}_err")) {{ '
+                f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
+                f'}} else {{ '
+                f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
+            )
+            for p in params
+        ])
 
-        base_header = (
-            "set encoding utf8\n"
-            "set terminal pngcairo size 800,600\n"
-            f"set title \"{cfg['title']}\"\n"
-            "set xlabel \"X\"\n"
-            "set ylabel \"Y\"\n"
-            "set fit errorvariables\n"
-            f"{init_lines}\n\n"
-            f"f(x) = {formula}\n"
-            f"fit f(x) \"{datafile}\" via {params_csv}\n\n"
-            f"{prints}\n\n"
-        )
+        main_lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set title \"{plot_cfg['title']}\"",
+            "set xlabel \"X\"",
+            "set ylabel \"Y\"",
+            "",
+            "set fit errorvariables",
+            init_lines,
+            "",
+            f"f(x) = {formula}",
+            f"fit f(x) \"{datafile}\" via {params_csv}",
+            "",
+            prints,
+            "",
+        ]
 
-        scripts: List[GeometryScript] = []
         if out_plot:
+            main_lines.append(f"set output \"{out_plot}\"")
             if use_err:
-                plot_cmd = (
-                    f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
-                    f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+                main_lines.append(
+                    (
+                        f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
+                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
+                    )
                 )
             else:
-                plot_cmd = (
-                    f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
-                    f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+                main_lines.append(
+                    (
+                        f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
+                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
+                    )
                 )
+            main_lines.append("unset output")
 
-            scripts.append(
-                GeometryScript(
-                    code=base_header
-                    + f"set output \"{_sanitize_path(out_plot)}\"\n"
-                    + plot_cmd
-                    + "unset output\n",
-                    output=_sanitize_path(out_plot),
-                    kind="primary",
-                    caption="Best-fit curve",
-                    collect_parameters=True,
-                )
-            )
+        residual_script = None
+        if out_residuals:
+            residual_lines = [
+                f"set output \"{out_residuals}\"",
+                f"set title \"Residuals — {plot_cfg['title']}\"",
+                "set xlabel \"X\"",
+                "set ylabel \"Residual (y - f(x))\"",
+                "set grid back",
+                f"plot \"{datafile}\" using 1:($2 - f($1)) with points pt {pt} title \"Residuals\", \\",
+                "     0 with lines notitle lc rgb \"gray\"",
+                "unset output",
+            ]
+            residual_script = "\n".join(residual_lines)
 
-        if out_residuals and cfg.get("residuals", True):
-            residual_code = (
-                base_header
-                + f"set output \"{_sanitize_path(out_residuals)}\"\n"
-                + f"set title \"Residuals — {cfg['title']}\"\n"
-                + "set xlabel \"X\"\n"
-                + "set ylabel \"Residual (y - f(x))\"\n"
-                + "set grid back\n"
-                + (
-                    f"plot \"{datafile}\" using 1:($2 - f($1)) with points pt {pt} title \"Residuals\", \\\n"
-                    "     0 with lines notitle lc rgb \"gray\"\n"
-                )
-                + "unset output\n"
-            )
-            scripts.append(
-                GeometryScript(
-                    code=residual_code,
-                    output=_sanitize_path(out_residuals),
-                    kind="residual",
-                    caption="Residuals",
-                    asset_type="residuals",
-                )
-            )
-
-        return scripts
+        return GeometryScript(main="\n".join(main_lines), residuals=residual_script)
 
 
 class HistogramGeometry(GeometryStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            key="histogram",
-            label="Histogram",
-            requires_fit=False,
-            supports_residuals=False,
-            options=[
-                GeometryOption(
-                    name="column",
-                    label="Data column",
-                    kind="int",
-                    default=1,
-                    min_value=1,
-                ),
-                GeometryOption(
-                    name="bin_count",
-                    label="Number of bins",
-                    kind="int",
-                    default=20,
-                    min_value=1,
-                ),
-            ],
-        )
+    name = "histogram"
+    label = "Histogram"
+    description = "1D histogram rendered with boxes."
+    options = [
+        GeometryOption("column", "Data column", "int", default=1, min_value=1),
+        GeometryOption("bins", "Number of bins", "int", default=20, min_value=1),
+    ]
 
-    def build_scripts(
+    def _post_validate(
         self,
-        cfg: Mapping[str, Any],
-        style: Mapping[str, Any],
-        options: Mapping[str, Any],
+        options: Dict[str, Any],
         *,
-        out_plot: Optional[str],
-        out_residuals: Optional[str],
-        plot_dir: str,
-    ) -> List[GeometryScript]:
-        if not out_plot:
-            return []
-
-        col = style.get("line_color", "#1f77b4")
-        column = int(options.get("column", 1))
-        bin_count = int(options.get("bin_count", 20))
-
-        datafile = _sanitize_path(cfg["datafile"])
-        code = (
-            "set encoding utf8\n"
-            "set terminal pngcairo size 800,600\n"
-            f"set title \"{cfg['title']}\"\n"
-            "set xlabel \"Value\"\n"
-            "set ylabel \"Frequency\"\n"
-            "set style fill solid 0.6 border -1\n"
-            "set boxwidth 1.0\n"
-            f"bin_count = {bin_count}\n"
-            f"stats \"{datafile}\" using {column} name \"S\" nooutput\n"
-            "if (S_max - S_min <= 0) binwidth = 1.0\n"
-            "else binwidth = (S_max - S_min) / bin_count\n"
-            "if (binwidth <= 0) binwidth = 1.0\n"
-            "set boxwidth binwidth\n"
-            "bin(x) = binwidth * floor(x/binwidth) + binwidth/2.0\n"
-            f"set output \"{_sanitize_path(out_plot)}\"\n"
-            f"plot \"{datafile}\" using (bin(${column})):(1.0) smooth freq with boxes lc rgb \"{col}\" title \"Histogram\"\n"
-            "unset output\n"
-        )
-        return [
-            GeometryScript(
-                code=code,
-                output=_sanitize_path(out_plot),
-                kind="primary",
-                caption="Histogram",
-                asset_type="histogram",
+        data_columns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        col = options.get("column", 1)
+        if data_columns is not None and col > data_columns:
+            raise GeometryValidationError(
+                f"Histogram column index {col} exceeds available columns ({data_columns})"
             )
+        return options
+
+    def generate_gnuplot(
+        self,
+        plot_cfg: Mapping[str, Any],
+        out_plot: Optional[str],
+        out_residuals: Optional[str] = None,
+    ) -> GeometryScript:
+        if not out_plot:
+            raise GeometryValidationError("Histogram geometry requires an output path")
+
+        datafile = plot_cfg["datafile"].replace("\\", "/")
+        style = plot_cfg.get("style", {})
+        color = style.get("line_color", "#1f77b4")
+        options = plot_cfg.get("geometry_options", {})
+        column = options.get("column", 1)
+        bins = options.get("bins", 20)
+
+        main_lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set title \"{plot_cfg['title']}\"",
+            "set xlabel \"Value\"",
+            "set ylabel \"Frequency\"",
+            f"stats \"{datafile}\" using {column} name \"STATS\" nooutput",
+            f"binwidth = (STATS_max - STATS_min) / {bins}",
+            "if (binwidth <= 0) binwidth = 1",
+            "set boxwidth binwidth",
+            "set style fill solid 0.6 border -1",
+            "set xtics binwidth",
+            "set xrange [STATS_min:STATS_max]",
+            f"set output \"{out_plot}\"",
+            (
+                f"plot \"{datafile}\" using (floor($${column}/binwidth)*binwidth + binwidth/2.0):(1.0) "
+                f"smooth freq with boxes lc rgb \"{color}\" title \"{plot_cfg['title']}\""
+            ),
+            "unset output",
         ]
 
-
-class SurfaceGeometry(GeometryStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            key="surface",
-            label="3D Surface",
-            requires_fit=False,
-            supports_residuals=False,
-            options=[
-                GeometryOption("x_column", "X column", "int", 1, min_value=1),
-                GeometryOption("y_column", "Y column", "int", 2, min_value=1),
-                GeometryOption("z_column", "Z column", "int", 3, min_value=1, required=True),
-                GeometryOption("grid_size", "Grid density", "int", 40, min_value=5),
-                GeometryOption(
-                    "produce_heatmap",
-                    "Generate heatmap",
-                    "bool",
-                    True,
-                    description="Create a top-down heatmap companion render.",
-                ),
-            ],
-        )
-
-    def build_scripts(
-        self,
-        cfg: Mapping[str, Any],
-        style: Mapping[str, Any],
-        options: Mapping[str, Any],
-        *,
-        out_plot: Optional[str],
-        out_residuals: Optional[str],
-        plot_dir: str,
-    ) -> List[GeometryScript]:
-        scripts: List[GeometryScript] = []
-        datafile = _sanitize_path(cfg["datafile"])
-        x_col = int(options.get("x_column", 1))
-        y_col = int(options.get("y_column", 2))
-        z_col = int(options.get("z_column", 3))
-        grid = int(options.get("grid_size", 40))
-
-        palette_cmd = "set palette rgb 7,5,15\n"
-
-        if out_plot:
-            code = (
-                "set encoding utf8\n"
-                "set terminal pngcairo size 900,700 enhanced\n"
-                f"set title \"{cfg['title']} — Surface\"\n"
-                "set xlabel \"X\"\n"
-                "set ylabel \"Y\"\n"
-                "set zlabel \"Z\"\n"
-                "set pm3d depthorder\n"
-                "set hidden3d\n"
-                f"set dgrid3d {grid}, {grid}\n"
-                + palette_cmd
-                + f"set output \"{_sanitize_path(out_plot)}\"\n"
-                + f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d title \"Surface\"\n"
-                + "unset output\n"
-            )
-            scripts.append(
-                GeometryScript(
-                    code=code,
-                    output=_sanitize_path(out_plot),
-                    kind="primary",
-                    caption="3D surface render",
-                    asset_type="surface",
-                )
-            )
-
-        if bool(options.get("produce_heatmap", True)):
-            heatmap_path = _sanitize_path(
-                os.path.join(plot_dir, "surface_heatmap.png")
-            )
-            heatmap_code = (
-                "set encoding utf8\n"
-                "set terminal pngcairo size 800,600 enhanced\n"
-                f"set title \"{cfg['title']} — Heatmap\"\n"
-                "set view map\n"
-                "set pm3d map\n"
-                "set xlabel \"X\"\n"
-                "set ylabel \"Y\"\n"
-                + palette_cmd
-                + f"set output \"{heatmap_path}\"\n"
-                + f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle\n"
-                + "unset output\n"
-            )
-            scripts.append(
-                GeometryScript(
-                    code=heatmap_code,
-                    output=heatmap_path,
-                    kind="extra",
-                    caption="Surface heatmap",
-                    asset_type="heatmap",
-                )
-            )
-
-        return scripts
+        return GeometryScript(main="\n".join(main_lines))
 
 
 class HeatmapGeometry(GeometryStrategy):
-    def __init__(self) -> None:
-        super().__init__(
-            key="heatmap",
-            label="Heatmap",
-            requires_fit=False,
-            supports_residuals=False,
-            options=[
-                GeometryOption("x_column", "X column", "int", 1, min_value=1),
-                GeometryOption("y_column", "Y column", "int", 2, min_value=1),
-                GeometryOption("z_column", "Intensity column", "int", 3, min_value=1, required=True),
-            ],
-        )
+    name = "heatmap"
+    label = "Heatmap"
+    description = "2D heatmap rendered with pm3d."
+    options = [
+        GeometryOption("x_column", "X column", "int", default=1, min_value=1),
+        GeometryOption("y_column", "Y column", "int", default=2, min_value=1),
+        GeometryOption("z_column", "Z column", "int", default=3, min_value=1),
+    ]
 
-    def build_scripts(
+    def _post_validate(
         self,
-        cfg: Mapping[str, Any],
-        style: Mapping[str, Any],
-        options: Mapping[str, Any],
+        options: Dict[str, Any],
         *,
-        out_plot: Optional[str],
-        out_residuals: Optional[str],
-        plot_dir: str,
-    ) -> List[GeometryScript]:
-        if not out_plot:
-            return []
-
-        datafile = _sanitize_path(cfg["datafile"])
-        x_col = int(options.get("x_column", 1))
-        y_col = int(options.get("y_column", 2))
-        z_col = int(options.get("z_column", 3))
-
-        code = (
-            "set encoding utf8\n"
-            "set terminal pngcairo size 800,600 enhanced\n"
-            f"set title \"{cfg['title']} — Heatmap\"\n"
-            "set view map\n"
-            "set pm3d map\n"
-            "set xlabel \"X\"\n"
-            "set ylabel \"Y\"\n"
-            "set cblabel \"Intensity\"\n"
-            "set palette rgb 7,5,15\n"
-            f"set output \"{_sanitize_path(out_plot)}\"\n"
-            f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle\n"
-            "unset output\n"
-        )
-        return [
-            GeometryScript(
-                code=code,
-                output=_sanitize_path(out_plot),
-                kind="primary",
-                caption="Heatmap",
-                asset_type="heatmap",
+        data_columns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        cols = [options.get("x_column", 1), options.get("y_column", 2), options.get("z_column", 3)]
+        if data_columns is not None and any(col > data_columns for col in cols):
+            raise GeometryValidationError(
+                f"Heatmap columns {cols} exceed available columns ({data_columns})"
             )
+        return options
+
+    def generate_gnuplot(
+        self,
+        plot_cfg: Mapping[str, Any],
+        out_plot: Optional[str],
+        out_residuals: Optional[str] = None,
+    ) -> GeometryScript:
+        if not out_plot:
+            raise GeometryValidationError("Heatmap geometry requires an output path")
+
+        datafile = plot_cfg["datafile"].replace("\\", "/")
+        options = plot_cfg.get("geometry_options", {})
+        x_col = options.get("x_column", 1)
+        y_col = options.get("y_column", 2)
+        z_col = options.get("z_column", 3)
+
+        lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set title \"{plot_cfg['title']}\"",
+            "set xlabel \"X\"",
+            "set ylabel \"Y\"",
+            "set view map",
+            "set pm3d map",
+            "set palette rgb 33,13,10",
+            f"set output \"{out_plot}\"",
+            (
+                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d title \"{plot_cfg['title']}\""
+            ),
+            "unset output",
         ]
 
+        return GeometryScript(main="\n".join(lines))
 
-# Register built-in geometries
-register_geometry(LineGeometry())
+
+class SurfaceGeometry(GeometryStrategy):
+    name = "surface"
+    label = "3D Surface"
+    description = "3D surface plot with auxiliary top-down heatmap."
+    options = [
+        GeometryOption("x_column", "X column", "int", default=1, min_value=1),
+        GeometryOption("y_column", "Y column", "int", default=2, min_value=1),
+        GeometryOption("z_column", "Z column", "int", default=3, min_value=1),
+    ]
+
+    def _post_validate(
+        self,
+        options: Dict[str, Any],
+        *,
+        data_columns: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        cols = [options.get("x_column", 1), options.get("y_column", 2), options.get("z_column", 3)]
+        if data_columns is not None and any(col > data_columns for col in cols):
+            raise GeometryValidationError(
+                f"Surface columns {cols} exceed available columns ({data_columns})"
+            )
+        return options
+
+    def generate_gnuplot(
+        self,
+        plot_cfg: Mapping[str, Any],
+        out_plot: Optional[str],
+        out_residuals: Optional[str] = None,
+    ) -> GeometryScript:
+        if not out_plot:
+            raise GeometryValidationError("Surface geometry requires an output path")
+
+        datafile = plot_cfg["datafile"].replace("\\", "/")
+        options = plot_cfg.get("geometry_options", {})
+        x_col = options.get("x_column", 1)
+        y_col = options.get("y_column", 2)
+        z_col = options.get("z_column", 3)
+        style = plot_cfg.get("style", {})
+        color = style.get("line_color", "#1f77b4")
+
+        main_lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set title \"{plot_cfg['title']}\"",
+            "set xlabel \"X\"",
+            "set ylabel \"Y\"",
+            "set zlabel \"Z\"",
+            "set hidden3d",
+            "set ticslevel 0",
+            "set view 60, 135, 1, 1",
+            f"set output \"{out_plot}\"",
+            (
+                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with lines lc rgb \"{color}\" "
+                f"title \"{plot_cfg['title']}\""
+            ),
+            "unset output",
+        ]
+
+        base, ext = (out_plot.rsplit(".", 1) + [""])[0:2]
+        aux_path = f"{base}_top.{ext or 'png'}"
+        aux_lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set title \"{plot_cfg['title']} — Top View\"",
+            "set view map",
+            "set pm3d map",
+            "set palette rgb 33,13,10",
+            f"set output \"{aux_path}\"",
+            (
+                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle"
+            ),
+            "unset output",
+        ]
+
+        auxiliary = [("\n".join(aux_lines), aux_path, "Top-down heatmap projection")]
+        return GeometryScript(main="\n".join(main_lines), auxiliary=auxiliary)
+
+
+# Register built-in strategies
+register_geometry(LineFitGeometry())
 register_geometry(HistogramGeometry())
-register_geometry(SurfaceGeometry())
 register_geometry(HeatmapGeometry())
+register_geometry(SurfaceGeometry())

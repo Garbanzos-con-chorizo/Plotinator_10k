@@ -6,7 +6,7 @@ import shutil
 import re
 from ttkbootstrap.constants import *
 
-from plotinator.engine.geometries import list_geometries, get_geometry
+from plotinator.engine.geometries import GeometryOption, get_geometry, list_geometries
 
 
 CONFIG_PATH = "config.json"
@@ -165,21 +165,14 @@ class PlotinatorApp(ttkb.Window):
         fits = self.config_data.get("fits", [])
         for fit in fits:
             title = fit.get("title", "")
-            geometry_key = fit.get("geometry") or "line"
-            fit.setdefault("geometry", geometry_key)
-            fit.setdefault("geometry_options", {})
-            try:
-                geometry_obj = get_geometry(geometry_key)
-                geometry_label = geometry_obj.label
-            except Exception:
-                geometry_obj = None
-                geometry_label = geometry_key.title()
             formula = fit.get("formula", "")
             datafile = os.path.basename(fit.get("datafile", ""))  # cleaner filename only
-            if geometry_obj and not geometry_obj.supports_residuals:
-                residuals = "—"
-            else:
-                residuals = "✅" if fit.get("residuals", False) else "❌"
+            residuals = "✅" if fit.get("residuals", False) else "❌"
+            geometry_name = fit.get("geometry", "line")
+            try:
+                geometry_label = get_geometry(geometry_name).label
+            except KeyError:
+                geometry_label = geometry_name.title()
             self.tree.insert(
                 "",
                 "end",
@@ -275,7 +268,7 @@ class PlotinatorApp(ttkb.Window):
             "color": "#1f77b4",
             "parameters": {"a": 1.0, "b": 1.0},
             "geometry": "line",
-            "geometry_options": {"error_bars": False},
+            "geometry_options": {},
         }
         self.config_data.setdefault("fits", []).append(new_fit)
         index = len(self.config_data["fits"]) - 1
@@ -293,8 +286,6 @@ class PlotinatorApp(ttkb.Window):
 
         index = self.tree.index(item_id)
         fit = self.config_data["fits"][index]
-        fit.setdefault("geometry", "line")
-        fit.setdefault("geometry_options", {})
 
         # direct deletion, no popup confirm
         del self.config_data["fits"][index]
@@ -307,7 +298,8 @@ class PlotinatorApp(ttkb.Window):
         """Open the edit window for a specific fit index."""
         fit = self.config_data["fits"][index]
         fit.setdefault("geometry", "line")
-        fit.setdefault("geometry_options", {})
+        if not isinstance(fit.get("geometry_options"), dict):
+            fit["geometry_options"] = {}
         edit_win = tk.Toplevel(self)
         edit_win.title(f"Edit Fit #{index + 1}")
         edit_win.geometry("600x600")
@@ -386,40 +378,77 @@ class PlotinatorApp(ttkb.Window):
             except Exception as e:
                 self.show_toast(f"❌ Copy failed: {e}", level="error")
 
+
+
+
         frame = tk.Frame(scrollable_frame)
         frame.pack(fill="x", padx=10)
         tk.Entry(frame, textvariable=data_var).pack(side="left", fill="x", expand=True)
         tk.Button(frame, text="📂", command=browse_file).pack(side="left", padx=5)
 
-        # --- Geometry selection
-        geometry_registry = {g.key: g for g in list_geometries()}
-        geometry_labels = {key: geom.label for key, geom in geometry_registry.items()}
-        geometry_label_to_key = {label: key for key, label in geometry_labels.items()}
-
-        geometry_key_var = tk.StringVar(value=fit.get("geometry", "line"))
-        geometry_label_var = tk.StringVar(
-            value=geometry_labels.get(geometry_key_var.get(), geometry_key_var.get().title())
-        )
-
-        tk.Label(scrollable_frame, text="Geometry:").pack(anchor="w", padx=10, pady=(10, 2))
-        geometry_combo = ttkb.Combobox(
-            scrollable_frame,
-            values=list(geometry_labels.values()),
-            textvariable=geometry_label_var,
-            state="readonly",
-        )
-        geometry_combo.pack(fill="x", padx=10)
-        geometry_combo.set(geometry_label_var.get())
-
-        geometry_options_frame = tk.Frame(scrollable_frame)
-        geometry_options_frame.pack(fill="x", padx=10, pady=(5, 5))
-        geometry_options_vars: dict[str, tuple[tk.Variable, str]] = {}
-
+        # --- Residuals
         residuals_var = tk.BooleanVar(value=fit.get("residuals", True))
-        residuals_check = tk.Checkbutton(
-            scrollable_frame, text="Generate residuals plot", variable=residuals_var
-        )
+        residuals_check = tk.Checkbutton(scrollable_frame, text="Generate residuals plot", variable=residuals_var)
         residuals_check.pack(anchor="w", padx=10, pady=5)
+
+        # --- Geometry selection ---
+        tk.Label(scrollable_frame, text="Geometry:").pack(anchor="w", padx=10, pady=(10, 2))
+        geometries = list_geometries()
+        label_map = {g.label: g.name for g in geometries}
+        name_to_label = {g.name: g.label for g in geometries}
+        default_label = name_to_label.get(fit.get("geometry", "line"), geometries[0].label if geometries else "Line / Curve Fit")
+        geometry_var = tk.StringVar(value=default_label)
+        geometry_combo = ttk.Combobox(scrollable_frame, textvariable=geometry_var, values=list(label_map.keys()), state="readonly")
+        geometry_combo.pack(fill="x", padx=10)
+        tk.Label(scrollable_frame, text="Different geometries unlock tailored rendering behaviours.", fg="gray").pack(anchor="w", padx=12, pady=(0, 6))
+
+        geometry_options_frame = tk.LabelFrame(scrollable_frame, text="Geometry options")
+        geometry_options_frame.pack(fill="x", padx=10, pady=(0, 10))
+        option_vars: dict[str, tuple[tk.Variable, GeometryOption]] = {}
+
+        def current_geometry_name() -> str:
+            label = geometry_var.get()
+            return label_map.get(label, geometries[0].name if geometries else "line")
+
+        def render_geometry_options():
+            for widget in geometry_options_frame.winfo_children():
+                widget.destroy()
+            option_vars.clear()
+
+            strategy = get_geometry(current_geometry_name())
+            existing = fit.get("geometry_options", {}) or {}
+
+            if not strategy.options:
+                tk.Label(geometry_options_frame, text="(No additional options)", fg="gray").pack(anchor="w", padx=10, pady=4)
+            else:
+                for opt in strategy.options:
+                    value = existing.get(opt.name, opt.default)
+                    if opt.kind == "bool":
+                        var = tk.BooleanVar(value=bool(value))
+                        chk = tk.Checkbutton(geometry_options_frame, text=opt.label, variable=var)
+                        chk.pack(anchor="w", padx=10, pady=3)
+                        option_vars[opt.name] = (var, opt)
+                        if opt.help_text:
+                            tk.Label(geometry_options_frame, text=opt.help_text, fg="gray").pack(anchor="w", padx=26)
+                    else:
+                        row = tk.Frame(geometry_options_frame)
+                        row.pack(fill="x", padx=10, pady=3)
+                        tk.Label(row, text=f"{opt.label}:").pack(side="left")
+                        var = tk.StringVar(value=str(value) if value is not None else "")
+                        tk.Entry(row, textvariable=var, width=12).pack(side="left", padx=6)
+                        option_vars[opt.name] = (var, opt)
+                        if opt.help_text:
+                            tk.Label(geometry_options_frame, text=opt.help_text, fg="gray").pack(anchor="w", padx=26)
+
+            strategy = get_geometry(current_geometry_name())
+            if strategy.supports_fit:
+                formula_entry.config(state="normal")
+                residuals_check.config(state="normal")
+            else:
+                formula_entry.config(state="disabled")
+                residuals_var.set(False)
+                residuals_check.config(state="disabled")
+
 
         # --- Color
         tk.Label(scrollable_frame, text="Color:").pack(anchor="w", padx=10, pady=2)
@@ -440,43 +469,7 @@ class PlotinatorApp(ttkb.Window):
         params_frame = tk.Frame(scrollable_frame)
         params_frame.pack(fill="x", padx=10)
 
-        param_vars: dict[str, tk.Variable] = {}
-
-        def rebuild_geometry_options_fields():
-            geometry_options_vars.clear()
-            for widget in geometry_options_frame.winfo_children():
-                widget.destroy()
-
-            geometry = geometry_registry.get(geometry_key_var.get())
-            if geometry_key_var.get() == fit.get("geometry"):
-                current_options = fit.get("geometry_options", {}) or {}
-            else:
-                current_options = {}
-
-            if geometry and getattr(geometry, "options", None):
-                for opt in geometry.options:
-                    if opt.kind == "bool":
-                        var = tk.BooleanVar(value=bool(current_options.get(opt.name, opt.default)))
-                        chk = tk.Checkbutton(geometry_options_frame, text=opt.label, variable=var)
-                        chk.pack(anchor="w", pady=2)
-                        if opt.description:
-                            tk.Label(geometry_options_frame, text=opt.description, fg="gray").pack(anchor="w", padx=20)
-                    else:
-                        row = tk.Frame(geometry_options_frame)
-                        row.pack(fill="x", pady=2)
-                        tk.Label(row, text=f"{opt.label}:").pack(side="left")
-                        val = current_options.get(opt.name, opt.default)
-                        var = tk.StringVar(value="" if val is None else str(val))
-                        tk.Entry(row, textvariable=var, width=12).pack(side="left", padx=5)
-                        if opt.description:
-                            tk.Label(geometry_options_frame, text=opt.description, fg="gray").pack(anchor="w", padx=20)
-                    geometry_options_vars[opt.name] = (var, opt.kind)
-            else:
-                tk.Label(
-                    geometry_options_frame,
-                    text="No additional options for this geometry.",
-                    fg="gray",
-                ).pack(anchor="w")
+        param_vars = {}
 
         def refresh_parameters():
             """Rebuild parameter entries based on formula contents."""
@@ -484,11 +477,9 @@ class PlotinatorApp(ttkb.Window):
                 widget.destroy()
             param_vars.clear()
 
-            geometry = geometry_registry.get(geometry_key_var.get())
-            if not geometry or not geometry.requires_fit:
-                tk.Label(
-                    params_frame, text="This geometry does not use fit parameters.", fg="gray"
-                ).pack(anchor="w")
+            strategy = get_geometry(current_geometry_name())
+            if not strategy.supports_fit:
+                tk.Label(params_frame, text="(Geometry does not use fit parameters)", fg="gray").pack(anchor="w")
                 return
 
             param_names = self.extract_parameters_from_formula(formula_var.get())
@@ -509,34 +500,15 @@ class PlotinatorApp(ttkb.Window):
 
             self.show_toast("🔄 Parameters updated from formula" , level="info")
 
-        def sync_geometry_dependents():
-            geometry = geometry_registry.get(geometry_key_var.get())
-            needs_fit = geometry.requires_fit if geometry else True
+        # Initialize once
+        render_geometry_options()
+        refresh_parameters()
 
-            if geometry and not geometry.supports_residuals:
-                residuals_var.set(False)
-                residuals_check.config(state="disabled")
-            else:
-                residuals_check.config(state="normal")
-
-            formula_entry.configure(state="normal" if needs_fit else "disabled")
-
-        def on_geometry_selected(event=None):
-            label = geometry_label_var.get()
-            key = geometry_label_to_key.get(label, geometry_key_var.get())
-            geometry_key_var.set(key)
-            rebuild_geometry_options_fields()
-            sync_geometry_dependents()
+        def on_geometry_change(*_):
+            render_geometry_options()
             refresh_parameters()
 
-        geometry_combo.bind("<<ComboboxSelected>>", on_geometry_selected)
-
-        # Initialize geometry-dependent UI
-        rebuild_geometry_options_fields()
-
-        # --- Parameters initial build
-        refresh_parameters()
-        sync_geometry_dependents()
+        geometry_combo.bind("<<ComboboxSelected>>", on_geometry_change)
 
         # Automatically refresh when formula changes
         formula_var.trace_add("write", lambda *_: refresh_parameters())
@@ -545,53 +517,47 @@ class PlotinatorApp(ttkb.Window):
         # --- Save button
         tk.Label(scrollable_frame, text=" ").pack()  # spacer before Save button
         def save_and_close():
-            geometry_key = geometry_key_var.get()
-            geometry_obj = geometry_registry.get(geometry_key)
-
-            options_payload: dict[str, object] = {}
-            for name, (var, kind) in geometry_options_vars.items():
-                raw = var.get()
-                try:
-                    if kind == "bool":
-                        value = bool(raw)
-                    elif kind == "int":
-                        value = int(raw)
-                    elif kind == "float":
-                        value = float(raw)
-                    else:
-                        value = str(raw)
-                except (TypeError, ValueError):
-                    continue
-                options_payload[name] = value
-
+            geometry_name = current_geometry_name()
+            strategy = get_geometry(geometry_name)
             fit["title"] = title_var.get()
             fit["formula"] = formula_var.get()
             fit["datafile"] = data_var.get()
+            fit["geometry"] = geometry_name
+            fit["residuals"] = residuals_var.get() if strategy.supports_residuals else False
             fit["color"] = color_var.get()
-            fit["geometry"] = geometry_key
+
+            options_payload = {}
+            for name, (var, opt) in option_vars.items():
+                value = var.get()
+                kind = getattr(opt, "kind", "str")
+                try:
+                    if kind == "int":
+                        value = int(value)
+                    elif kind == "float":
+                        value = float(value)
+                    elif kind == "bool":
+                        if isinstance(value, str):
+                            value = value.strip().lower() in {"1", "true", "yes", "on"}
+                        else:
+                            value = bool(value)
+                    else:
+                        value = str(value)
+                except (TypeError, ValueError):
+                    if isinstance(opt, GeometryOption):
+                        value = opt.default
+                options_payload[name] = value
             fit["geometry_options"] = options_payload
-            if geometry_obj:
-                fit["geometry_label"] = geometry_obj.label
 
-            if geometry_obj and geometry_obj.supports_residuals:
-                fit["residuals"] = residuals_var.get()
-            else:
-                fit["residuals"] = False
-
-            if geometry_obj and geometry_obj.requires_fit:
+            if strategy.supports_fit:
                 fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
             else:
                 fit["parameters"] = {}
-
-            if geometry_key == "line":
-                fit["error_bars"] = bool(options_payload.get("error_bars", False))
-            elif "error_bars" in fit:
-                del fit["error_bars"]
 
             self.save_config()
             self.refresh_table()
             self.show_toast(f"Saved '{fit['title']}'", level="info")
             edit_win.destroy()
+
 
 
         tk.Button(scrollable_frame, text="💾 Save", command=save_and_close, bg="#4CAF50", fg="white").pack(pady=15)

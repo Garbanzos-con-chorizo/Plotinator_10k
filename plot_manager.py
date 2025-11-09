@@ -6,11 +6,9 @@ import re
 import math
 import numpy as np
 
-from typing import List
-
 from plotinator.engine.geometries import (
-    GeometryScript,
     GeometryValidationError,
+    GeometryScript,
     get_geometry,
 )
 
@@ -126,44 +124,18 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
 
 
 def generate_gnuplot_code(
-    cfg: dict,
-    out_plot: str | None,
-    out_residuals: str | None = None,
-    *,
-    plot_dir: str | None = None,
-) -> List[GeometryScript]:
-    geometry_key = cfg.get("geometry", "line")
-    geometry = get_geometry(geometry_key)
+    cfg: dict, out_plot: str | None, out_residuals: str | None = None
+) -> GeometryScript:
+    geometry = get_geometry(cfg.get("geometry", "line"))
+    sanitized_cfg = dict(cfg)
 
-    style = cfg.get("style", {})
-    options = cfg.get("geometry_options", {})
+    if geometry.supports_fit:
+        datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
+        guesses = estimate_initial_params(datafile, cfg["fit_formula"], cfg["fit_params"])
+        sanitized_cfg["computed_initials"] = guesses
 
-    cfg_copy = dict(cfg)
-    if geometry.requires_fit:
-        guesses = dict(cfg_copy.get("initial_guesses") or {})
-        if not guesses and cfg_copy.get("fit_params"):
-            guesses = estimate_initial_params(
-                cfg_copy["datafile"],
-                cfg_copy["fit_formula"],
-                cfg_copy.get("fit_params", []),
-            )
-        cfg_copy["initial_guesses"] = guesses
-
-    if plot_dir is None:
-        candidate = out_plot or out_residuals or cfg_copy.get("datafile", "")
-        plot_dir = (
-            os.path.dirname(os.path.abspath(candidate)) if candidate else os.getcwd()
-        )
-
-    scripts = geometry.build_scripts(
-        cfg_copy,
-        style,
-        options,
-        out_plot=out_plot,
-        out_residuals=out_residuals,
-        plot_dir=plot_dir,
-    )
-    return scripts
+    residual_target = out_residuals if geometry.supports_residuals else None
+    return geometry.generate_gnuplot(sanitized_cfg, out_plot, residual_target)
 
 
 BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
@@ -180,6 +152,16 @@ def infer_parameters(formula: str) -> list[str]:
     return params
 
 
+def detect_data_columns(path: str) -> int:
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            return len(line.split())
+    raise ValueError(f"Data file '{path}' does not contain any data rows")
+
+
 def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     if isinstance(cfg.get("plots"), list):
         return cfg["plots"]
@@ -191,27 +173,43 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     base_dir = os.path.dirname(os.path.abspath(config_path))
     normalized: list[dict] = []
     for fit in fits:
-        title = fit.get("title", "Untitled")
-        geometry_key = (fit.get("geometry") or "line").lower()
-        try:
-            geometry = get_geometry(geometry_key)
-        except GeometryValidationError as exc:
-            raise GeometryValidationError(
-                f"Fit '{title}' references unknown geometry '{geometry_key}'"
-            ) from exc
-
-        raw_options = dict(fit.get("geometry_options") or {})
-        if "error_bars" not in raw_options and "error_bars" in fit:
-            raw_options["error_bars"] = fit.get("error_bars")
-        options = geometry.normalize_options(raw_options)
-
         datafile = fit.get("datafile") or ""
         if datafile and not os.path.isabs(datafile):
             datafile = os.path.abspath(os.path.join(base_dir, datafile))
         if not datafile or not os.path.exists(datafile):
             raise FileNotFoundError(
-                f"Data file not found for fit '{title}': {datafile}"
+                f"Data file not found for fit '{fit.get('title', 'Untitled')}': {datafile}"
             )
+
+        try:
+            column_count = detect_data_columns(datafile)
+        except OSError as exc:
+            raise FileNotFoundError(
+                f"Could not read data file for fit '{fit.get('title', 'Untitled')}': {exc}"
+            ) from exc
+
+        geometry_name = (fit.get("geometry") or "line").lower()
+        try:
+            geometry = get_geometry(geometry_name)
+        except KeyError as exc:
+            raise ValueError(str(exc)) from exc
+
+        raw_options = fit.get("geometry_options") if isinstance(fit.get("geometry_options"), dict) else {}
+        try:
+            geometry_options = geometry.validate(raw_options, data_columns=column_count)
+        except GeometryValidationError as exc:
+            raise ValueError(f"{fit.get('title', 'Untitled')}: {exc}") from exc
+
+        if geometry.supports_fit:
+            formula = fit.get("formula") or fit.get("fit_formula") or "a*x + b"
+            params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
+            params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
+            if not params:
+                raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+        else:
+            formula = fit.get("formula") or fit.get("fit_formula") or ""
+            params_dict = {}
+            params = []
 
         style = fit.get("style", {}).copy()
         if "color" in fit and fit["color"]:
@@ -219,54 +217,34 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         elif "line_color" not in style:
             style["line_color"] = "#1f77b4"
 
-        residuals = bool(fit.get("residuals", True)) if geometry.supports_residuals else False
-
-        formula = fit.get("formula") or fit.get("fit_formula")
-        if geometry.requires_fit:
-            if not (formula and formula.strip()):
-                raise ValueError(
-                    f"Fit '{title}' requires a formula for geometry '{geometry.label}'."
-                )
-            params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
-            fit_params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
-            if not fit_params:
-                raise ValueError(f"Cannot infer parameters for formula '{formula}'")
-
-            initial_params: dict[str, float] = {}
-            for key in fit_params:
+        initial_params = {}
+        if geometry.supports_fit:
+            for key in params:
                 try:
                     initial_params[key] = float(params_dict.get(key, ""))
                 except (TypeError, ValueError, AttributeError):
                     continue
 
-            initial_guesses = estimate_initial_params(datafile, formula, fit_params)
-        else:
-            formula = formula or ""
-            fit_params = []
-            initial_params = {}
-            initial_guesses = {}
+        residuals_requested = bool(fit.get("residuals", geometry.supports_residuals))
+        if not geometry.supports_residuals:
+            residuals_requested = False
 
         normalized.append(
             {
-                "title": title,
-                "geometry": geometry.key,
-                "geometry_options": options,
-                "geometry_label": geometry.label,
+                "title": fit.get("title", "Untitled"),
                 "fit_formula": formula,
                 "datafile": datafile,
-                "residuals": residuals and geometry.requires_fit,
+                "residuals": residuals_requested,
                 "style": style,
-                "fit_params": fit_params,
-                "initial_params": initial_params,
-                "initial_guesses": initial_guesses,
-                "error_bars": bool(options.get("error_bars", False)),
+                "fit_params": params if geometry.supports_fit else [],
+                "initial_params": initial_params if geometry.supports_fit else {},
+                "error_bars": bool(fit.get("error_bars", False)) if geometry.supports_fit else False,
+                "geometry": geometry.name,
+                "geometry_options": geometry_options,
             }
         )
 
     return normalized
-
-
-
 
 
 # ---------- main ----------
@@ -277,73 +255,57 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
     import os
 
-    geometry = get_geometry(plot_cfg.get("geometry", "line"))
     safe_title = plot_cfg["title"].replace(" ", "_")
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
 
     out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
-    residuals_enabled = (
-        geometry.supports_residuals
-        and geometry.requires_fit
-        and bool(plot_cfg.get("residuals", True))
-    )
-    residuals_path = (
-        os.path.join(plot_dir, "residuals.png").replace("\\", "/")
-        if residuals_enabled
-        else None
-    )
 
-    scripts = generate_gnuplot_code(
-        plot_cfg,
-        out_plot=out_plot,
-        out_residuals=residuals_path,
-        plot_dir=plot_dir,
-    )
+    geometry = get_geometry(plot_cfg.get("geometry", "line"))
 
-    params: dict = {}
-    produced_residual: str | None = None
-    extras: list[dict] = []
+    residuals_path = None
+    if geometry.supports_residuals and plot_cfg.get("residuals", True):
+        residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
 
-    for script in scripts:
-        output_text = run_gnuplot_script(script.code, workdir=plot_dir)
-        if script.collect_parameters:
-            params = parse_fit_output(output_text)
-        if script.kind == "residual":
-            produced_residual = script.output
-        elif script.kind == "extra" and script.output:
-            extras.append(
-                {
-                    "type": script.asset_type,
-                    "path": script.output,
-                    "caption": script.caption or script.asset_type.title(),
-                }
-            )
+    scripts = generate_gnuplot_code(plot_cfg, out_plot, residuals_path)
+
+    # --- Main render / fit ---
+    output_text = run_gnuplot_script(scripts.main, workdir=plot_dir)
+    params = parse_fit_output(output_text) if geometry.supports_fit else {}
 
     metrics = None
-    if geometry.requires_fit and params:
-        metrics = compute_residual_metrics(
-            plot_cfg["datafile"], params, plot_cfg["fit_formula"]
+    if residuals_path and scripts.residuals and params:
+        metrics = compute_residual_metrics(plot_cfg["datafile"], params, plot_cfg["fit_formula"])
+        run_gnuplot_script(scripts.residuals, workdir=plot_dir)
+    elif not geometry.supports_residuals:
+        residuals_path = None
+
+    auxiliary_assets: list[dict] = []
+    for script, asset_path, caption in scripts.auxiliary:
+        run_gnuplot_script(script, workdir=plot_dir)
+        auxiliary_assets.append(
+            {
+                "path": asset_path.replace("\\", "/"),
+                "caption": caption,
+            }
         )
 
+    # --- Package result ---
     result = {
         "title": plot_cfg["title"],
-        "formula": plot_cfg["fit_formula"],
+        "formula": plot_cfg.get("fit_formula", ""),
         "parameters": params,
         "metrics": metrics,
         "datafile": plot_cfg["datafile"],
-        "output_plot": out_plot if scripts else None,
-        "residuals_plot": produced_residual if produced_residual else None,
-        "geometry": plot_cfg.get("geometry"),
-        "geometry_label": plot_cfg.get("geometry_label", geometry.label),
+        "output_plot": out_plot,
+        "residuals_plot": residuals_path,
+        "geometry": plot_cfg.get("geometry", "line"),
         "geometry_options": plot_cfg.get("geometry_options", {}),
-        "extra_assets": extras,
+        "auxiliary_assets": auxiliary_assets,
     }
 
-    print(f"[OK] Finished: {plot_cfg['title']} ({geometry.label})")
+    print(f"[OK] Finished: {plot_cfg['title']}")
     return result
-
-
 
 
 
