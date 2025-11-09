@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser, simpledialog
-import subprocess, os, json, threading
+import subprocess, os, json, threading, platform, webbrowser
 import ttkbootstrap as ttkb  # pip install ttkbootstrap
 import shutil
 import re
@@ -504,7 +504,21 @@ class PlotinatorApp(ttkb.Window):
         latest = sorted(os.listdir(outputs_path))[-1]
         report = os.path.join(outputs_path, latest, "report.pdf")
         if os.path.exists(report):
-            os.startfile(report)
+            try:
+                system = platform.system()
+                if system == "Windows":
+                    os.startfile(report)
+                elif system == "Darwin":
+                    subprocess.run(["open", report], check=False)
+                else:
+                    opener = shutil.which("xdg-open")
+                    if opener:
+                        subprocess.run([opener, report], check=False)
+                    else:
+                        webbrowser.open(f"file://{os.path.abspath(report)}")
+            except Exception as exc:
+                self.show_toast("Warning", f"Could not open report automatically: {exc}", level="warning")
+                return
         else:
             self.show_toast("Warning", "No report.pdf found in latest output.", level="warning")
 
