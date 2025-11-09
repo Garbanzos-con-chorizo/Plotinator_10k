@@ -536,7 +536,8 @@ class DatasetDialog(ttkb.Toplevel):
         self._stop_log.clear()
 
         def _runner() -> None:
-            cmd = [sys.executable, "plot_manager.py", CONFIG_PATH]
+            script_path = Path(__file__).resolve().with_name("plot_manager.py")
+            cmd = [sys.executable, str(script_path), str(self.config_path)]
             try:
                 process = subprocess.Popen(
                     cmd,
@@ -544,9 +545,10 @@ class DatasetDialog(ttkb.Toplevel):
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
+                    cwd=self.config_path.parent,
                 )
             except OSError as exc:
-                self._append_log(f"Failed to start plot_manager.py: {exc}\n")
+                self._append_log(f"Failed to start {script_path}: {exc}\n")
                 return
 
             for line in process.stdout:
