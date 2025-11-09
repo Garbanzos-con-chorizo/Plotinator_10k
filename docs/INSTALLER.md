@@ -1,128 +1,109 @@
 # Plotinator 10k Installer Guide
 
-This guide walks through building a frozen desktop bundle with [PyInstaller](https://pyinstaller.org/) and wrapping that bundle in a Windows `.msi` installer for beta distribution.
+This guide describes how to freeze the Plotinator 10k toolkit with [PyInstaller](https://pyinstaller.org/) and how to wrap the
+resulting bundle in a Windows `.msi` installer using the [WiX Toolset](https://wixtoolset.org/). Follow the steps in order on a
+Windows machine so that native dependencies are captured correctly.
 
-> **Tip:** Always run the commands from a clean checkout on Windows to guarantee you are bundling the correct platform binaries.
+> **Tip:** Always start from a clean checkout on the target platform. PyInstaller in particular embeds the Python runtime and
+> system DLLs that are present when you build.
 
-## Prerequisites
+## 1. Prerequisites
 
-1. **Python** – install Python 3.10 or newer and ensure `python` is available in your `PATH`.
-2. **Project dependencies** – the GUI requires the same native tools as the CLI:
+1. **Python** – Install Python 3.10 or newer and ensure `python`/`pip` resolve from the terminal.
+2. **Runtime tooling** – Install the external binaries that Plotinator shells out to during execution:
    - [`gnuplot`](http://www.gnuplot.info/)
    - [`pandoc`](https://pandoc.org/)
    - [`wkhtmltopdf`](https://wkhtmltopdf.org/)
-3. **Packaging toolchain**
-   - [PyInstaller](https://pyinstaller.org/) 6.x
-   - [`pyinstaller-hooks-contrib`](https://github.com/pyinstaller/pyinstaller-hooks-contrib)
-   - [WiX Toolset 3.14+](https://wixtoolset.org/) (provides `heat.exe`, `candle.exe`, and `light.exe` for MSI authoring)
-
-Install the Python dependencies inside a virtual environment so the build is reproducible:
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip wheel
-python -m pip install .[yaml]
-python -m pip install pyinstaller pyinstaller-hooks-contrib
-```
-
-## Build the PyInstaller bundle
-
-1. From the repository root, generate a spec file that freezes the GUI entry point and includes the project packages:
+   Export their locations as environment variables before packaging so the PyInstaller spec can pick them up:
    ```powershell
-   pyinstaller plotinator10000.py `
-     --name Plotinator10k `
-     --windowed `
-     --onedir `
-     --noconfirm `
-     --collect-submodules plotinator `
-     --collect-submodules engine `
-     --collect-submodules config `
-     --add-data "config;config" `
-     --add-data "engine;engine" `
-     --add-data "plotinator;plotinator"
+   setx GNUPLOT_PATH "C:\\Program Files\\gnuplot\\bin\\gnuplot.exe"
+   setx PANDOC_PATH "C:\\Program Files\\Pandoc\\pandoc.exe"
+   setx WKHTMLTOPDF_PATH "C:\\Program Files\\wkhtmltopdf\\bin\\wkhtmltopdf.exe"
    ```
-   The command creates `Plotinator10k.spec` and a first build inside `dist/Plotinator10k/`.
-2. Re-run PyInstaller against the generated spec to ensure deterministic rebuilds:
+   Restart the terminal session after updating `setx` values.
+3. **Python dependencies** – Install project extras alongside PyInstaller in an isolated environment:
    ```powershell
-   pyinstaller Plotinator10k.spec --clean --noconfirm
+   python -m venv .venv
+   .\.venv\Scripts\activate
+   python -m pip install --upgrade pip wheel
+   python -m pip install .[yaml]
+   python -m pip install pyinstaller pyinstaller-hooks-contrib
    ```
-3. Verify the bundle:
-   - Executable: `dist\Plotinator10k\Plotinator10k.exe`
-   - Supporting files: `dist\Plotinator10k\contents\*`
-   - Log: `build\Plotinator10k\warn-Plotinator10k.txt` (should be empty)
+4. **WiX Toolset** – Download WiX 3.14+ and either add `%WIX%\bin` to `PATH` or reference the absolute binary paths when running
+   `heat.exe`, `candle.exe`, and `light.exe`.
 
-> **Linux/macOS note:** Replace each `;` in the `--add-data` arguments with `:` when building on non-Windows hosts.
+## 2. Build the PyInstaller bundle
 
-## Wrap the MSI installer
+The repository ships with a tailored spec at `packaging/plotinator.spec` that produces all three entry points (CLI, GUI, and report
+helper) in a single folder.
 
-1. Capture the version number so it can be injected into the installer metadata:
+1. From the repository root, run PyInstaller against the spec:
    ```powershell
-   $PLOTINATOR_VERSION = (python -c "import plotinator; print(plotinator.__version__)").Trim()
+   pyinstaller packaging/plotinator.spec --clean --noconfirm
    ```
-2. Harvest the PyInstaller output into a WiX source file using `heat.exe`:
+2. Inspect the output under `dist\plotinator-bundle` and confirm that it contains:
+   - `plotinator-cli.exe`
+   - `plotinator-gui.exe`
+   - `plotinator-report.exe`
+   - A `data\` folder with the sample `.dat` files
+   - An `external\` folder with the detected `gnuplot`, `pandoc`, and `wkhtmltopdf` executables
+3. Smoke-test the executables before proceeding:
    ```powershell
-   New-Item -ItemType Directory -Force -Path installer | Out-Null
-   "%WIX%\bin\heat.exe" dir dist\Plotinator10k `
+   .\dist\plotinator-bundle\plotinator-cli.exe --help
+   .\dist\plotinator-bundle\plotinator-report.exe --help
+   Start-Process .\dist\plotinator-bundle\plotinator-gui.exe
+   ```
+   Verify that `plotinator-gui.exe` launches, loads `config.json`, and can exit cleanly. If any tool fails to start, double-check
+   that the corresponding external binary is present inside `dist\plotinator-bundle\external` and rebuild if necessary.
+
+## 3. Author the MSI installer
+
+MSI authoring assets live under `packaging/windows/`. The folder contains a WiX template (`plotinator.wxs`) and documentation for
+collecting files from the PyInstaller bundle.
+
+1. **Harvest** the PyInstaller output into a component description using WiX `heat`:
+   ```powershell
+   $bundle = Resolve-Path dist/plotinator-bundle
+   New-Item -ItemType Directory -Force -Path packaging/windows/build | Out-Null
+   heat dir $bundle `
      -dr APPLICATIONFOLDER `
-     -cg Plotinator10kComponents `
+     -cg PlotinatorBundleComponents `
      -gg `
      -sfrag `
      -srd `
-     -out installer\Plotinator10k-files.wxs
+     -out packaging/windows/build/plotinator-files.wxs
    ```
-   - `APPLICATIONFOLDER` becomes the default installation directory under `Program Files`.
-   - The resulting `Plotinator10k-files.wxs` lists all files generated by PyInstaller.
-3. Create (or update) an installer definition that references the harvested component group, for example `installer\Plotinator10k.wxs`:
-   ```xml
-   <?xml version="1.0" encoding="UTF-8"?>
-   <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-     <Product Id="*"
-              Name="Plotinator 10k"
-              Manufacturer="Plotinator Labs"
-              Version="$(var.PLOTINATOR_VERSION)"
-              UpgradeCode="PUT-YOUR-STATIC-UPGRADE-GUID-HERE">
-       <Package InstallerVersion="500"
-                Compressed="yes"
-                InstallScope="perMachine" />
-       <MediaTemplate EmbedCab="yes" />
-       <MajorUpgrade DowngradeErrorMessage="A newer version of Plotinator 10k is already installed." />
-       <Feature Id="MainFeature" Title="Plotinator 10k" Level="1">
-         <ComponentGroupRef Id="Plotinator10kComponents" />
-       </Feature>
-       <UIRef Id="WixUI_InstallDir" />
-       <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
-       <Directory Id="TARGETDIR" Name="SourceDir">
-         <Directory Id="ProgramFilesFolder">
-           <Directory Id="APPLICATIONFOLDER" Name="Plotinator 10k" />
-         </Directory>
-       </Directory>
-     </Product>
-   </Wix>
-   ```
-   Keep the `UpgradeCode` constant across releases.
-4. Compile the WiX sources into an MSI:
+   The generated file is referenced by the template via `<ComponentGroupRef Id="PlotinatorBundleComponents" />`.
+2. **Compile** the WiX sources with the correct version metadata:
    ```powershell
-   "%WIX%\bin\candle.exe" installer\Plotinator10k.wxs installer\Plotinator10k-files.wxs `
-     -dPLOTINATOR_VERSION=$PLOTINATOR_VERSION `
-     -out installer\
-   "%WIX%\bin\light.exe" installer\Plotinator10k.wixobj installer\Plotinator10k-files.wixobj `
+   $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
+   $wixOut = Resolve-Path packaging/windows/build
+   candle packaging/windows/plotinator.wxs $wixOut/plotinator-files.wxs `
+     -dPLOTINATOR_VERSION=$version `
+     -out $wixOut/
+   ```
+   Replace the placeholder `UpgradeCode` in `plotinator.wxs` with a stable GUID before the first production release.
+3. **Link** the compiled objects into a distributable MSI:
+   ```powershell
+   light $wixOut/plotinator.wixobj $wixOut/plotinator-files.wixobj `
      -ext WixUIExtension `
      -cultures:en-us `
-     -o dist\Plotinator10k-$PLOTINATOR_VERSION.msi
+     -o dist/plotinator-$version.msi
    ```
-5. Expected outputs:
-   - Frozen bundle: `dist\Plotinator10k\Plotinator10k.exe`
-   - Installer artefact: `dist\Plotinator10k-$PLOTINATOR_VERSION.msi`
+4. **Verify** the installer on a clean Windows environment:
+   - Run the MSI and choose the default installation directory.
+   - Confirm the binaries are placed under `Program Files\Plotinator 10k`.
+   - Launch the installed `Plotinator GUI` shortcut and trigger a sample batch run using the bundled `data\` files.
+   - Generate a PDF report via `Plotinator Report Helper` to ensure `pandoc`/`wkhtmltopdf` were correctly captured.
 
-## Packaging Troubleshooting
+## 4. Packaging Troubleshooting
 
 | Symptom | Cause | Resolution |
 | --- | --- | --- |
-| `gnuplot` invocation fails or plots are missing after installation | `gnuplot` is not present on the build machine, so the frozen app cannot bundle the runtime dependency | Install `gnuplot` before running PyInstaller; update `%PATH%` so `gnuplot.exe` resolves. Rebuild the bundle. |
-| PDF report generation crashes with `pandoc: command not found` | Pandoc or `wkhtmltopdf` were absent during packaging | Install both tools and rebuild. Consider adding them to the WiX installer as `Bundle` prerequisites if redistribution is required. |
-| PyInstaller build log reports missing modules such as `plot_manager` or `plotinator.config` | Hidden imports were not collected | Ensure the `pyinstaller` command uses `--collect-submodules` for `plotinator`, `engine`, and `config`. Delete `build/` and `dist/` before rebuilding. |
-| MSI compilation fails with `error LGHT0103 : The system cannot find the file specified` | `heat.exe` output path or `%WIX%` environment variable is incorrect | Confirm the WiX Toolset is installed and `%WIX%\bin` is on `PATH`, or supply the absolute path when running `candle.exe` and `light.exe`. |
-| Installer launches but app immediately exits | Missing runtime DLLs (VC++ redistributable) on the target machine | Install the [Microsoft Visual C++ Redistributable for VS 2015-2022](https://aka.ms/vs/17/release/vc_redist.x64.exe) on the target system. |
+| `gnuplot` invocation fails or plots are missing after installation | `gnuplot` was absent when PyInstaller ran, so the executable was not copied into `external/` | Install `gnuplot`, update `GNUPLOT_PATH`, delete `build/` and `dist/`, then rebuild the PyInstaller bundle. |
+| PDF export crashes with `pandoc: command not found` | `pandoc` or `wkhtmltopdf` were missing when PyInstaller executed | Install both tools, set the corresponding environment variables, and rebuild so the binaries appear in `external/`. |
+| PyInstaller build log reports missing modules such as `plot_manager` | Hidden imports were not collected | Use the provided `packaging/plotinator.spec`; it already collects the `engine`, `config`, `plotinator`, and `reports` packages. Delete previous build artefacts before retrying. |
+| `light.exe` fails with `LGHT0103` (file not found) | Incorrect path to the harvested WiX file or WiX binaries | Ensure `%WIX%` is configured or invoke `heat`, `candle`, and `light` with absolute paths. Verify `packaging/windows/build/plotinator-files.wxs` exists. |
+| Installer launches but the app immediately exits | Missing Visual C++ runtime on the target machine | Install the [Microsoft Visual C++ Redistributable for VS 2015-2022](https://aka.ms/vs/17/release/vc_redist.x64.exe) before running Plotinator. |
 
-Once the MSI is generated, smoke-test the installer on a clean Windows VM before publishing it to beta users.
+Once the MSI passes validation, publish both the zipped `dist/plotinator-bundle` folder and the MSI to your distribution channel.
