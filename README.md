@@ -104,11 +104,16 @@ Each layer communicates through clear interfaces:
 1. Update `CHANGELOG.md` and bump the version in `pyproject.toml` (mirrored by
    `plotinator.__version__`).
 2. Run the smoke tests or demo configuration to ensure CLI, GUI, and reporting still interoperate.
-3. Build the distribution:
+3. Build the distribution artefacts:
    ```bash
    python -m build
    ```
+   For a frozen Windows build and MSI installer, follow the [Installer Guide](docs/INSTALLER.md).
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).
+
+## Packaging Troubleshooting
+
+Common packaging failures and how to recover are documented in the [Installer Guide](docs/INSTALLER.md#packaging-troubleshooting).
 
 ## License
 
