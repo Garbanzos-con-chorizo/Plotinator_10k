@@ -588,7 +588,7 @@ class DatasetDialog(ttkb.Toplevel):
                 self._runner_process = process
                 for line in process.stdout:
                     if self._stop_log.is_set():
-                        break
+                        continue
                     self._append_log(line)
                 process.wait()
                 self.progress.configure(value=100)
