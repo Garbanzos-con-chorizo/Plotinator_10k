@@ -35,6 +35,7 @@ class PlotinatorApp(ttkb.Window):
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
         self.runner_thread: threading.Thread | None = None
+        self._runner_process: subprocess.Popen[str] | None = None
         self._stop_log = threading.Event()
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
@@ -584,6 +585,7 @@ class DatasetDialog(ttkb.Toplevel):
                 self._append_log(f"Failed to start {script_path}: {exc}\n")
             else:
                 assert process.stdout is not None
+                self._runner_process = process
                 for line in process.stdout:
                     if self._stop_log.is_set():
                         break
@@ -593,6 +595,7 @@ class DatasetDialog(ttkb.Toplevel):
                 self._append_log("\n[DONE] Batch finished.\n")
             finally:
                 self._stop_log.set()
+                self._runner_process = None
                 self.runner_thread = None
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
@@ -618,6 +621,21 @@ class DatasetDialog(ttkb.Toplevel):
         """Signal the log reader to stop and wait for the worker to finish."""
 
         self._stop_log.set()
+        process = self._runner_process
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            else:
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+        self._runner_process = None
         thread = self.runner_thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join()
