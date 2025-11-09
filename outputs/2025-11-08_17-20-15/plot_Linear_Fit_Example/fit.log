@@ -1,0 +1,35 @@
+
+
+*******************************************************************************
+Sat Nov 08 17:20:15 2025
+
+
+FIT:    data read from "C:/Users/jacin/Documents/Lab Physics/Plotinator 100000/data/sample1.dat"
+        format = z
+        #datapoints = 6
+        residuals are weighted equally (unit weight)
+
+function used for fitting: f(x)
+	f(x) = a*x + b
+fitted parameters initialized with current variable values
+
+iter      chisq       delta/lim  lambda   a             b            
+   0 2.6790000000e+03   0.00e+00  1.55e+01    5.000000e+00   1.000000e+01
+BREAK: Singular matrix in Invert_RtR
+
+*******************************************************************************
+Sat Nov 08 17:20:16 2025
+
+
+FIT:    data read from "C:/Users/jacin/Documents/Lab Physics/Plotinator 100000/data/sample1.dat"
+        format = z
+        #datapoints = 6
+        residuals are weighted equally (unit weight)
+
+function used for fitting: f(x)
+	f(x) = a*x + b
+fitted parameters initialized with current variable values
+
+iter      chisq       delta/lim  lambda   a             b            
+   0 2.6790000000e+03   0.00e+00  1.55e+01    5.000000e+00   1.000000e+01
+BREAK: Singular matrix in Invert_RtR

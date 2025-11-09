@@ -1,0 +1,45 @@
+{
+  "timestamp": "2025-11-08_17-20-15",
+  "results": [
+    {
+      "title": "Exponential Fit Example",
+      "formula": "A * exp(B * x)",
+      "parameters": {
+        "A": {
+          "value": 26.69974084697295,
+          "error": 2.626124198526512e+24
+        },
+        "B": {
+          "value": 53.24137738386725,
+          "error": 1.716921786841741e+22
+        }
+      },
+      "metrics": null,
+      "datafile": "data/sample2.dat",
+      "output_plot": "C:/Users/jacin/Documents/Lab Physics/Plotinator 100000/outputs/2025-11-08_17-20-15/plot_Exponential_Fit_Example/plot.png",
+      "residuals_plot": null
+    },
+    {
+      "title": "Linear Fit Example",
+      "formula": "a*x + b",
+      "parameters": {
+        "a": {
+          "value": 1.999999999999967,
+          "error": 0.0
+        },
+        "b": {
+          "value": 1.415615131810473e-13,
+          "error": 0.0
+        }
+      },
+      "metrics": {
+        "mean": -2.5757174171303632e-14,
+        "std": 5.63416034792173e-14,
+        "rmse": 6.19500468434062e-14
+      },
+      "datafile": "data/sample1.dat",
+      "output_plot": "C:/Users/jacin/Documents/Lab Physics/Plotinator 100000/outputs/2025-11-08_17-20-15/plot_Linear_Fit_Example/plot.png",
+      "residuals_plot": "C:/Users/jacin/Documents/Lab Physics/Plotinator 100000/outputs/2025-11-08_17-20-15/plot_Linear_Fit_Example/residuals.png"
+    }
+  ]
+}
