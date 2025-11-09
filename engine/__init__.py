@@ -1,6 +1,6 @@
 from .config import infer_parameters, normalize_layout, normalize_plots
 from .data_pipeline import apply_preprocessing, prepare_datafile
-from .runner import process_plot, run_batch, run_gnuplot_script
+from .runner import process_plot, run_batch, run_gnuplot_script, run_job
 from .script_builder import (
     compute_residual_metrics,
     estimate_initial_params,
@@ -20,5 +20,6 @@ __all__ = [
     "prepare_datafile",
     "process_plot",
     "run_batch",
+    "run_job",
     "run_gnuplot_script",
 ]

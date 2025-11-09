@@ -3,15 +3,17 @@ from __future__ import annotations
 import copy
 import json
 import os
-import subprocess
-import sys
+import queue
 import threading
 import tkinter as tk
+from typing import Any
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
+
+from engine import run_job
 
 CONFIG_PATH = "config.json"
 
@@ -29,7 +31,9 @@ class PlotinatorApp(ttkb.Window):
         self.folder: Path | None = None
         self.config_data: dict = {"fits": []}
         self.runner_thread: threading.Thread | None = None
-        self._stop_log = threading.Event()
+        self._event_queue: queue.Queue[dict[str, Any]] | None = None
+        self._progress_total = 0
+        self._progress_completed = 0
 
         self._create_widgets()
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -579,32 +583,113 @@ class DatasetDialog(ttkb.Toplevel):
         self.save_config()
         self.progress.configure(value=0)
         self.log_text.delete("1.0", tk.END)
-        self._stop_log.clear()
+        self._progress_total = 0
+        self._progress_completed = 0
+        self._event_queue = queue.Queue()
+
+        def _push_event(event: dict[str, Any]) -> None:
+            if self._event_queue is not None:
+                self._event_queue.put(event)
 
         def _runner() -> None:
-            cmd = [sys.executable, "plot_manager.py", CONFIG_PATH]
             try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
+                run_job(
+                    copy.deepcopy(self.config_data),
+                    config_path=CONFIG_PATH,
+                    on_event=_push_event,
                 )
-            except OSError as exc:
-                self._append_log(f"Failed to start plot_manager.py: {exc}\n")
-                return
-
-            for line in process.stdout:
-                if self._stop_log.is_set():
-                    break
-                self._append_log(line)
-            process.wait()
-            self.progress.configure(value=100)
-            self._append_log("\n[DONE] Batch finished.\n")
+            except Exception:  # noqa: BLE001 - run_job already reports via events
+                pass
+            finally:
+                if self._event_queue is not None:
+                    self._event_queue.put({"type": "job-thread-exit"})
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
         self.runner_thread.start()
+        self.after(100, self._poll_events)
+
+    # ------------------------------------------------------------------
+    def _poll_events(self) -> None:
+        if self._event_queue is None:
+            return
+        try:
+            while True:
+                event = self._event_queue.get_nowait()
+                self._handle_engine_event(event)
+        except queue.Empty:
+            pass
+
+        if self._event_queue is not None:
+            self.after(100, self._poll_events)
+
+    # ------------------------------------------------------------------
+    def _handle_engine_event(self, event: dict[str, Any]) -> None:
+        etype = event.get("type")
+        if etype == "log":
+            message = event.get("message", "")
+            if message and not message.endswith("\n"):
+                message += "\n"
+            if message:
+                self._append_log(message)
+            return
+
+        if etype == "job-start":
+            total = int(event.get("total") or 0)
+            self._progress_total = max(total, 0)
+            self._progress_completed = 0
+            self.progress.configure(value=0)
+            ts = event.get("timestamp", "")
+            self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
+            return
+
+        if etype == "plot-start":
+            title = event.get("title", "Untitled")
+            self._append_log(f"[RUN] Processing: {title}\n")
+            return
+
+        if etype == "plot-complete":
+            self._progress_completed += 1
+            self._update_progress_bar()
+            title = event.get("title", "Untitled")
+            self._append_log(f"[OK] Finished: {title}\n")
+            return
+
+        if etype == "plot-error":
+            self._progress_completed += 1
+            self._update_progress_bar()
+            title = event.get("title", "Untitled")
+            error_msg = event.get("error", "Unknown error")
+            self._append_log(f"[X] Error in {title}: {error_msg}\n")
+            self.show_toast(f"Plot failed: {title}", level="error")
+            return
+
+        if etype == "job-complete":
+            self.progress.configure(value=100)
+            results_path = event.get("results_path")
+            if results_path:
+                self._append_log(f"\n[COMPLETE] Results saved to: {results_path}\n")
+            self.show_toast("Batch complete", level="success")
+            return
+
+        if etype == "job-error":
+            error_msg = event.get("error", "Batch failed")
+            self._append_log(f"[X] {error_msg}\n")
+            messagebox.showerror("Batch failed", error_msg)
+            self.show_toast("Batch failed", level="error")
+            return
+
+        if etype == "job-thread-exit":
+            self.runner_thread = None
+            self._event_queue = None
+            return
+
+    # ------------------------------------------------------------------
+    def _update_progress_bar(self) -> None:
+        if self._progress_total:
+            percent = (self._progress_completed / self._progress_total) * 100
+        else:
+            percent = 0.0
+        self.progress.configure(value=min(percent, 100))
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
