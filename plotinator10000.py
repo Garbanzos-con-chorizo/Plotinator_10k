@@ -178,7 +178,7 @@ class PlotinatorApp(ttkb.Window):
     
     # --- Config management -------------------------------------------------
     def load_config(self):
-    # Always start with a sane default
+        # Always start with a sane default
         self.config_data = {"fits": []}
 
         if not os.path.exists(CONFIG_PATH):
