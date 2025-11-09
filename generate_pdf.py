@@ -55,6 +55,17 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         md.append(f"## {title}")
         md.append(f"**Formula:** `{formula}`  ")
 
+        datasets = item.get("datasets") or []
+        if datasets:
+            md.append("**Datasets:**")
+            md.append("| Label | Pane | Source |")
+            md.append("|-------|------|--------|")
+            for ds in datasets:
+                label = ds.get("label") or ds.get("id")
+                pane = ds.get("pane", "-")
+                source = os.path.relpath(ds.get("datafile", ""), output_folder).replace("\\", "/") if ds.get("datafile") else ""
+                md.append(f"| {label} | {pane} | {source} |")
+
         # Parameters table
         params = item.get("parameters", {})
         if params:
@@ -80,7 +91,10 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         md.append(f"![Plot]({plot_path})")
         if res_path:
             residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
-            md.append(f"![Residuals]({residuals_path})")
+            if residuals_path != plot_path:
+                md.append(f"![Residuals]({residuals_path})")
+        elif item.get("residuals_embedded"):
+            md.append("_Residuals plotted within the combined canvas._")
 
         md.append("\n---\n")
 
