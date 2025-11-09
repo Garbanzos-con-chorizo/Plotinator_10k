@@ -117,7 +117,9 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
     return guesses
 
 
-def generate_gnuplot_code(cfg: dict, out_plot: str, out_residuals: str | None = None) -> str:
+def generate_gnuplot_code(
+    cfg: dict, out_plot: str | None, out_residuals: str | None = None
+) -> str:
     style = cfg.get("style", {})
     pt  = style.get("point_type", 7)
     lw  = style.get("line_width", 2)
@@ -131,6 +133,10 @@ def generate_gnuplot_code(cfg: dict, out_plot: str, out_residuals: str | None = 
 
     # Compute smart initial guesses
     guesses = estimate_initial_params(datafile, formula, params)
+    overrides = cfg.get("initial_params") or {}
+    for key, value in overrides.items():
+        if key in guesses:
+            guesses[key] = value
     init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
     prints = "\n".join([
        f'if (exists("{p}_err")) {{ '
@@ -156,20 +162,20 @@ fit f(x) "{datafile}" via {params_csv}
 
 {prints}
 
-set output "{out_plot}"
 """
-    if use_err:
-        code += (
-            f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
-            f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
-        )
-    else:
-        code += (
-            f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
-            f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
-        )
-
-    code += "unset output\n"
+    if out_plot:
+        code += f"set output \"{out_plot}\"\n"
+        if use_err:
+            code += (
+                f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
+                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+            )
+        else:
+            code += (
+                f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
+                f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"\n"
+            )
+        code += "unset output\n"
 
     # Optional residuals
     if out_residuals:
@@ -184,6 +190,72 @@ plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
 unset output
 """
     return code
+
+
+BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
+
+
+def infer_parameters(formula: str) -> list[str]:
+    tokens = re.findall(r"[A-Za-zα-ωΑ-Ω_][A-Za-z0-9α-ωΑ-Ω_]*", formula or "")
+    params: list[str] = []
+    for token in tokens:
+        if token in BLACKLIST:
+            continue
+        if token not in params:
+            params.append(token)
+    return params
+
+
+def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
+    if isinstance(cfg.get("plots"), list):
+        return cfg["plots"]
+
+    fits = cfg.get("fits") or []
+    if not isinstance(fits, list):
+        raise ValueError("Config must contain a 'fits' list")
+
+    base_dir = os.path.dirname(os.path.abspath(config_path))
+    normalized: list[dict] = []
+    for fit in fits:
+        formula = fit.get("formula") or fit.get("fit_formula") or "a*x + b"
+        params_dict = fit.get("parameters") if isinstance(fit.get("parameters"), dict) else {}
+        params = list(params_dict.keys()) if params_dict else infer_parameters(formula)
+        if not params:
+            raise ValueError(f"Cannot infer parameters for formula '{formula}'")
+
+        datafile = fit.get("datafile") or ""
+        if datafile and not os.path.isabs(datafile):
+            datafile = os.path.abspath(os.path.join(base_dir, datafile))
+        if not datafile or not os.path.exists(datafile):
+            raise FileNotFoundError(f"Data file not found for fit '{fit.get('title', 'Untitled')}': {datafile}")
+
+        style = fit.get("style", {}).copy()
+        if "color" in fit and fit["color"]:
+            style.setdefault("line_color", fit["color"])
+        elif "line_color" not in style:
+            style["line_color"] = "#1f77b4"
+
+        initial_params = {}
+        for key in params:
+            try:
+                initial_params[key] = float(params_dict.get(key, ""))
+            except (TypeError, ValueError, AttributeError):
+                continue
+
+        normalized.append(
+            {
+                "title": fit.get("title", "Untitled"),
+                "fit_formula": formula,
+                "datafile": datafile,
+                "residuals": bool(fit.get("residuals", True)),
+                "style": style,
+                "fit_params": params,
+                "initial_params": initial_params,
+                "error_bars": bool(fit.get("error_bars", False)),
+            }
+        )
+
+    return normalized
 
 
 # ---------- main ----------
@@ -233,21 +305,28 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
 def main():
     import json, datetime, os
 
-    # Load config
-    with open("config.json", "r", encoding="utf-8") as f:
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
+
+    with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+
+    try:
+        plots = normalize_plots(cfg, config_path)
+    except Exception as exc:
+        print(f"[X] {exc}")
+        return 1
 
     # Base output folder
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_output = os.path.abspath(os.path.join("outputs", ts))
     os.makedirs(base_output, exist_ok=True)
 
-    print(f"[RUN] Starting batch at {ts} ({len(cfg['plots'])} plots)")
+    print(f"[RUN] Starting batch at {ts} ({len(plots)} plots)")
 
     # Run in parallel
     results = []
     with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(process_plot, plot_cfg, base_output) for plot_cfg in cfg["plots"]]
+        futures = [executor.submit(process_plot, plot_cfg, base_output) for plot_cfg in plots]
         for future in as_completed(futures):
             try:
                 results.append(future.result())
@@ -261,6 +340,7 @@ def main():
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
     print(f"\n[COMPLETE] All fits complete. Results saved to:\n{json_path}")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

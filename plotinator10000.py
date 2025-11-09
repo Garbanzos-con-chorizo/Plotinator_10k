@@ -462,6 +462,8 @@ class PlotinatorApp(ttkb.Window):
         self.save_config()
         self.show_toast("🚀 Starting batch generation...", level="info")
         self.log_text.delete("1.0", tk.END)
+        self.progress.config(mode="indeterminate")
+        self.progress.start(10)
 
         def run_backend():
             try:
@@ -485,6 +487,12 @@ class PlotinatorApp(ttkb.Window):
             except Exception as e:
                 self.log_text.insert("end", f"\n⚠️ Exception: {e}\n")
                 self.show_toast("⚠️ Backend error (see log)", level="error")
+
+            finally:
+                self.progress.stop()
+                self.progress.config(mode="determinate", value=0)
+
+        threading.Thread(target=run_backend, daemon=True).start()
 
 
 
