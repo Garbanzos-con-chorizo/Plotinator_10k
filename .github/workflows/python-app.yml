@@ -6,6 +6,8 @@ name: Python application
 on:
   push:
     branches: [ "main" ]
+    tags:
+      - "v*"
   pull_request:
     branches: [ "main" ]
 
@@ -44,3 +46,72 @@ jobs:
     - name: Build package
       run: |
         python -m build
+
+  windows-package:
+    name: Windows release packaging
+    runs-on: windows-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python 3.10
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.10"
+    - name: Cache pip downloads for Windows builds
+      uses: actions/cache@v3
+      with:
+        path: ~\AppData\Local\pip\Cache
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    - name: Install Python dependencies and PyInstaller
+      shell: pwsh
+      run: |
+        python -m pip install --upgrade pip
+        pip install .
+        pip install pyinstaller
+    - name: Install WiX Toolset via Chocolatey
+      shell: pwsh
+      run: |
+        choco install wixtoolset --no-progress -y
+        $wixPath = "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
+        if (Test-Path $wixPath) {
+          $wixPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        }
+    - name: Build PyInstaller bundle
+      shell: pwsh
+      run: |
+        pyinstaller packaging/plotinator.spec --clean --noconfirm
+    - name: Create MSI with WiX
+      shell: pwsh
+      run: |
+        $bundle = Resolve-Path dist/plotinator-bundle
+        New-Item -ItemType Directory -Force -Path packaging/windows/build | Out-Null
+        heat dir $bundle `
+          -dr APPLICATIONFOLDER `
+          -cg PlotinatorBundleComponents `
+          -gg `
+          -sfrag `
+          -srd `
+          -out packaging/windows/build/plotinator-files.wxs
+        $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
+        candle packaging/windows/plotinator.wxs packaging/windows/build/plotinator-files.wxs `
+          -dPLOTINATOR_VERSION=$version `
+          -out packaging/windows/build/
+        light packaging/windows/build/plotinator.wixobj packaging/windows/build/plotinator-files.wixobj `
+          -ext WixUIExtension `
+          -cultures:en-us `
+          -o dist/plotinator-$version.msi
+    - name: Upload PyInstaller bundle artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: plotinator-bundle-${{ github.ref_name }}
+        path: dist/plotinator-bundle/
+        if-no-files-found: error
+    - name: Upload MSI artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: plotinator-msi-${{ github.ref_name }}
+        path: dist/*.msi
+        if-no-files-found: error
