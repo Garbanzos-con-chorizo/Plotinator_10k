@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import datetime
-import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -11,7 +10,9 @@ from typing import Any, Callable, Dict
 from reports.markdown_builder import write_markdown_report
 from reports.pdf_exporter import export_pdf
 
-from .config import normalize_plots
+from pathlib import Path
+
+from config import ConfigError, load_config_file
 from .data_pipeline import prepare_datafile
 from .script_builder import (
     compute_residual_metrics,
@@ -241,10 +242,27 @@ def process_plot(
         "confidence_notes": confidence_notes,
     }
 
-    if dispatcher:
-        dispatcher.emit("plot-complete", title=plot_cfg.get("title", "Untitled"), result=result)
-
+    print(f"[OK] Finished: {plot_cfg['title']}")
     return result
+
+
+def run_batch(config_path: str, *, max_workers: int = 4) -> dict[str, Any]:
+    try:
+        job = load_config_file(config_path)
+    except ConfigError as exc:
+        raise RuntimeError(str(exc)) from exc
+
+    if job.settings.max_workers:
+        max_workers = job.settings.max_workers
+
+    plots = job.to_engine_payload()
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    output_root = job.settings.output_dir or Path("outputs").resolve()
+    output_root = Path(output_root)
+    base_output_path = (output_root / ts).resolve()
+    os.makedirs(base_output_path, exist_ok=True)
+    base_output = str(base_output_path)
 
 
 def run_job(
