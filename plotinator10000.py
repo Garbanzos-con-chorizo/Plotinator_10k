@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import copy
 import json
-import os
 import subprocess
 import sys
 import threading
@@ -12,6 +11,8 @@ from tkinter import filedialog, messagebox
 
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
+
+from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 
 CONFIG_PATH = "config.json"
 
@@ -27,7 +28,8 @@ class PlotinatorApp(ttkb.Window):
 
         self.style = ttkb.Style()
         self.folder: Path | None = None
-        self.config_data: dict = {"fits": []}
+        self.config_path = Path(CONFIG_PATH).resolve()
+        self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
         self.runner_thread: threading.Thread | None = None
         self._stop_log = threading.Event()
 
@@ -82,55 +84,56 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def load_config(self) -> None:
-        if not os.path.exists(CONFIG_PATH):
-            self.config_data = {"fits": []}
+        if not self.config_path.exists():
+            self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
             self.save_config()
             self.refresh_table()
             return
 
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-                raw = json.load(fh)
-        except (OSError, json.JSONDecodeError) as exc:
-            messagebox.showerror("Config error", f"Could not read config.json:\n{exc}")
-            self.config_data = {"fits": []}
+            self.job = load_config_file(self.config_path)
+        except ConfigError as exc:
+            messagebox.showerror("Config error", str(exc))
+            self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
             return
-
-        fits = raw.get("fits") if isinstance(raw, dict) else None
-        if not isinstance(fits, list):
-            messagebox.showwarning("Config warning", "config.json missing 'fits' list; starting empty")
-            fits = []
-        self.config_data = {"fits": fits}
-        for fit in self.config_data["fits"]:
-            self._ensure_fit_defaults(fit)
         self.refresh_table()
 
     # ------------------------------------------------------------------
     def save_config(self) -> None:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
-            json.dump(self.config_data, fh, indent=2)
+        payload = self.job.to_dict()
+        with open(self.config_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
         self.show_toast("Configuration saved", level="success")
+
+    # ------------------------------------------------------------------
+    def _reload_from_mapping(self, mapping: dict) -> bool:
+        try:
+            self.job = load_config(mapping, base_path=self.job.base_path)
+        except ConfigError as exc:
+            messagebox.showerror("Config error", str(exc))
+            return False
+        self.refresh_table()
+        return True
 
     # ------------------------------------------------------------------
     def refresh_table(self) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for fit in self.config_data.get("fits", []):
-            datasets = fit.get("datasets") or []
+        for fit in self.job.fits:
+            datasets = fit.datasets
             if datasets:
                 summary = ", ".join(
-                    Path(ds.get("data_source", {}).get("path", "")).name or ds.get("label", "")
-                    for ds in datasets[:2]
+                    Path(ds.data_source.original_path).name or ds.label for ds in datasets[:2]
                 )
                 if len(datasets) > 2:
                     summary += f" (+{len(datasets) - 2} more)"
             else:
-                summary = Path(fit.get("data_source", {}).get("path") or fit.get("datafile", "")).name
-            residuals = "✅" if fit.get("residuals", True) else "❌"
+                summary = ""
+            residuals = "✅" if fit.residuals else "❌"
             self.tree.insert(
                 "",
                 "end",
-                values=(fit.get("title", ""), fit.get("formula", ""), summary, residuals),
+                values=(fit.title, fit.fit_formula, summary, residuals),
             )
 
     # ------------------------------------------------------------------
@@ -150,12 +153,13 @@ class PlotinatorApp(ttkb.Window):
         if not selection:
             return
         index = self.tree.index(selection[0])
+        mapping = self.job.to_dict()
         try:
-            self.config_data["fits"].pop(index)
+            mapping.setdefault("fits", []).pop(index)
         except IndexError:
             return
-        self.refresh_table()
-        self.show_toast("Fit removed", level="warning")
+        if self._reload_from_mapping(mapping):
+            self.show_toast("Fit removed", level="warning")
 
     # ------------------------------------------------------------------
     def on_double_click(self, _event=None) -> None:
@@ -163,11 +167,14 @@ class PlotinatorApp(ttkb.Window):
         if not selection:
             return
         index = self.tree.index(selection[0])
-        fit = self.config_data["fits"][index]
+        try:
+            fit = self.job.fits[index]
+        except IndexError:
+            return
         self._open_fit_editor(fit, index)
 
     # ------------------------------------------------------------------
-    def _open_fit_editor(self, fit: dict | None = None, index: int | None = None) -> None:
+    def _open_fit_editor(self, fit: FitConfig | dict | None = None, index: int | None = None) -> None:
         base = {
             "title": "",
             "formula": "",
@@ -177,10 +184,10 @@ class PlotinatorApp(ttkb.Window):
             "layout": {"rows": 1, "columns": 1, "shared_x": False, "shared_y": False, "show_legend": True},
             "datasets": [],
         }
-        data = copy.deepcopy(base)
-        if fit:
-            data.update(copy.deepcopy(fit))
-        self._ensure_fit_defaults(data)
+        if isinstance(fit, FitConfig):
+            data = fit.to_dict(relative_to=self.job.base_path)
+        else:
+            data = copy.deepcopy(base)
         editor = ttkb.Toplevel(self)
         editor.title("Fit details")
         editor.geometry("620x520")
@@ -340,83 +347,30 @@ class PlotinatorApp(ttkb.Window):
                 "show_legend": show_legend.get(),
             }
             payload["datasets"] = copy.deepcopy(dataset_list)
-            self._ensure_fit_defaults(payload)
+            if data.get("parameters"):
+                payload["parameters"] = copy.deepcopy(data.get("parameters"))
+            style_overrides = copy.deepcopy(data.get("style", {}))
+            if payload["color"]:
+                style_overrides.setdefault("line_color", payload["color"])
+            if style_overrides:
+                payload["style"] = style_overrides
+
+            mapping = self.job.to_dict()
+            fits = mapping.setdefault("fits", [])
             if index is None:
-                self.config_data.setdefault("fits", []).append(payload)
+                fits.append(payload)
             else:
-                self.config_data["fits"][index] = payload
-            self.refresh_table()
-            editor.destroy()
+                try:
+                    fits[index] = payload
+                except IndexError:
+                    fits.append(payload)
+            if self._reload_from_mapping(mapping):
+                editor.destroy()
 
         buttons = ttkb.Frame(editor)
         buttons.pack(fill="x", pady=10)
         ttkb.Button(buttons, text="Cancel", command=editor.destroy).pack(side="right", padx=5)
         ttkb.Button(buttons, text="Save", command=_save, bootstyle="success").pack(side="right", padx=5)
-
-    # ------------------------------------------------------------------
-    def _ensure_fit_defaults(self, fit: dict) -> None:
-        fit.setdefault("title", "Untitled")
-        fit.setdefault("formula", "a*x + b")
-        fit.setdefault("residuals", True)
-        fit.setdefault("color", "#1f77b4")
-        layout = fit.setdefault("layout", {})
-        layout.setdefault("rows", 1)
-        layout.setdefault("columns", 1)
-        layout.setdefault("shared_x", False)
-        layout.setdefault("shared_y", False)
-        layout.setdefault("show_legend", True)
-
-        datasets = fit.setdefault("datasets", [])
-        # Migrate single data_source definitions into datasets list
-        if not datasets and fit.get("data_source"):
-            migrated = copy.deepcopy(fit["data_source"])
-            datasets.append(
-                {
-                    "label": fit.get("title", "Dataset"),
-                    "pane_index": 1,
-                    "data_source": migrated,
-                }
-            )
-        for dataset in datasets:
-            self._ensure_dataset_defaults(dataset, fallback_path=fit.get("datafile", ""))
-
-        # Retain compatibility if legacy keys exist but ensure structure
-        if "data_source" in fit:
-            fit.pop("data_source", None)
-
-    def _ensure_dataset_defaults(self, dataset: dict, fallback_path: str = "") -> None:
-        dataset.setdefault("label", "Dataset")
-        if "pane" not in dataset and "pane_index" not in dataset:
-            dataset["pane_index"] = 1
-        data_source = dataset.setdefault("data_source", {})
-        data_source.setdefault("path", fallback_path)
-        columns = data_source.get("columns")
-        if not isinstance(columns, dict):
-            columns = {}
-        cleaned_columns: dict[str, int | str | None] = {
-            "x": int(columns.get("x", 1) or 1),
-            "y": int(columns.get("y", 2) or 2),
-        }
-        if columns.get("error") not in (None, ""):
-            try:
-                cleaned_columns["error"] = int(columns.get("error"))
-            except (TypeError, ValueError):
-                cleaned_columns["error"] = columns.get("error")
-        if columns.get("weight") not in (None, ""):
-            try:
-                cleaned_columns["weight"] = int(columns.get("weight"))
-            except (TypeError, ValueError):
-                cleaned_columns["weight"] = columns.get("weight")
-        data_source["columns"] = cleaned_columns
-        preprocessing = data_source.get("preprocessing")
-        if not isinstance(preprocessing, list):
-            preprocessing = []
-        data_source["preprocessing"] = preprocessing
-        style = dataset.get("style")
-        if style is not None and not isinstance(style, dict):
-            dataset["style"] = {}
-        dataset.setdefault("style", {})
-
 
 class DatasetDialog(ttkb.Toplevel):
     def __init__(self, master: tk.Misc, dataset: dict | None = None) -> None:
