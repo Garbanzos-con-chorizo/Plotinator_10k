@@ -543,10 +543,25 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
 
-    out_plot = _gnuplot_path(os.path.join(plot_dir, "plot.png"))
+    plot_png_path = os.path.join(plot_dir, "plot.png")
+    residual_png_path = os.path.join(plot_dir, "residuals.png")
+
+    layout = plot_cfg.get("layout", {})
+    panes = layout.get("panes") or []
+    has_residual_pane = any(pane.get("residuals") for pane in panes)
+    residuals_requested = bool(plot_cfg.get("residuals", True))
+
+    gnuplot_output = _gnuplot_path(plot_png_path)
+    gnuplot_residual_output = (
+        _gnuplot_path(residual_png_path) if residuals_requested else None
+    )
 
     # --- Main fit ---
-    main_code = generate_gnuplot_code(plot_cfg, out_plot)
+    main_code = generate_gnuplot_code(
+        plot_cfg,
+        gnuplot_output,
+        gnuplot_residual_output,
+    )
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
     params = parse_fit_output(output_text)
 
@@ -555,8 +570,8 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     fit_dataset = dataset_lookup.get(plot_cfg.get("fit_dataset")) or (datasets[0] if datasets else None)
     residual_dataset = dataset_lookup.get(plot_cfg.get("residual_dataset")) or fit_dataset
 
-    residuals_embedded = False
-    residuals_path = None
+    residuals_embedded = has_residual_pane and residuals_requested
+    residuals_path = residual_png_path if residuals_requested else None
     metrics = None
 
     if params and plot_cfg.get("residuals", True) and residual_dataset:
@@ -581,7 +596,7 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
         "layout": plot_cfg.get("layout", {}),
         "fit_dataset": plot_cfg.get("fit_dataset"),
         "residual_dataset": plot_cfg.get("residual_dataset"),
-        "output_plot": out_plot,
+        "output_plot": plot_png_path,
         "residuals_plot": residuals_path,
         "residuals_embedded": residuals_embedded,
     }
