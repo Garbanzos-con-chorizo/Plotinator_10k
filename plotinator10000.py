@@ -4,6 +4,8 @@ import copy
 import json
 import os
 import queue
+import subprocess
+import sys
 import threading
 import tkinter as tk
 from typing import Any
@@ -33,7 +35,6 @@ class PlotinatorApp(ttkb.Window):
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
         self.runner_thread: threading.Thread | None = None
-        self._runner_process: subprocess.Popen[str] | None = None
         self._stop_log = threading.Event()
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
@@ -569,40 +570,35 @@ class DatasetDialog(ttkb.Toplevel):
 
         event_state = {"job_error": False}
 
+        class _BatchCancelled(Exception):
+            """Internal sentinel exception to abort the engine runner."""
+
+            pass
+
         def _push_event(event: dict[str, Any]) -> None:
+            if self._stop_log.is_set():
+                raise _BatchCancelled
             if self._event_queue is not None:
                 if event.get("type") == "job-error":
                     event_state["job_error"] = True
                 self._event_queue.put(event)
 
         def _runner() -> None:
-            process: subprocess.Popen[str] | None = None
-            script_path = Path(__file__).resolve().with_name("plot_manager.py")
-            cmd = [sys.executable, str(script_path), str(self.config_path)]
             try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    cwd=self.config_path.parent,
-                )
-            except OSError as exc:
-                self._append_log(f"Failed to start {script_path}: {exc}\n")
-            else:
-                assert process.stdout is not None
-                self._runner_process = process
-                for line in process.stdout:
-                    if self._stop_log.is_set():
-                        break
-                    self._append_log(line)
-                process.wait()
-                self.progress.configure(value=100)
-                self._append_log("\n[DONE] Batch finished.\n")
+                engine_run_batch(str(self.config_path), on_event=_push_event)
+            except _BatchCancelled:
+                self._append_log("[CANCELLED] Batch cancelled by user.\n")
+                self._set_status("Batch cancelled")
+            except Exception as exc:  # noqa: BLE001 - surface via events only
+                error_message = str(exc)
+                if not event_state["job_error"]:
+                    event_state["job_error"] = True
+                    if self._event_queue is not None:
+                        self._event_queue.put({"type": "job-error", "error": error_message})
+                    else:
+                        self._append_log(f"[X] {error_message}\n")
+                        self._set_status("Batch failed")
             finally:
-                self._stop_log.set()
-                self._runner_process = None
                 self.runner_thread = None
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
@@ -621,33 +617,31 @@ class DatasetDialog(ttkb.Toplevel):
             pass
 
         if self._event_queue is not None:
+            runner = self.runner_thread
+            if (runner is None or not runner.is_alive()) and self._event_queue.empty():
+                self._event_queue = None
+                return
             self.after(100, self._poll_events)
 
     # ------------------------------------------------------------------
     def _stop_runner_thread(self) -> None:
-        """Signal the log reader to stop and wait for the worker to finish."""
+        """Request cancellation of the in-process engine runner and drain events."""
 
         self._stop_log.set()
-        process = self._runner_process
-        if process and process.poll() is None:
-            try:
-                process.terminate()
-            except OSError:
-                pass
-            else:
-                try:
-                    process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    try:
-                        process.kill()
-                    except OSError:
-                        pass
-        self._runner_process = None
         thread = self.runner_thread
         if thread and thread.is_alive() and thread is not threading.current_thread():
             thread.join()
         self.runner_thread = None
+        queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
         self._event_queue = None
+        if queued_events is not None:
+            try:
+                while True:
+                    event = queued_events.get_nowait()
+                    self._handle_engine_event(event)
+            except queue.Empty:
+                pass
+        self._stop_log.clear()
 
     # ------------------------------------------------------------------
     def stop_batch(self) -> None:
@@ -752,11 +746,6 @@ class DatasetDialog(ttkb.Toplevel):
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
             self._set_status("Batch failed")
-            return
-
-        if etype == "job-thread-exit":
-            self.runner_thread = None
-            self._event_queue = None
             return
 
     # ------------------------------------------------------------------
