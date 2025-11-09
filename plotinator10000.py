@@ -548,17 +548,28 @@ class DatasetDialog(ttkb.Toplevel):
                 self._event_queue.put(event)
 
         def _runner() -> None:
+            script_path = Path(__file__).resolve().with_name("plot_manager.py")
+            cmd = [sys.executable, str(script_path), str(self.config_path)]
             try:
-                run_job(
-                    copy.deepcopy(self.config_data),
-                    config_path=CONFIG_PATH,
-                    on_event=_push_event,
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    cwd=self.config_path.parent,
                 )
-            except Exception:  # noqa: BLE001 - run_job already reports via events
-                pass
-            finally:
-                if self._event_queue is not None:
-                    self._event_queue.put({"type": "job-thread-exit"})
+            except OSError as exc:
+                self._append_log(f"Failed to start {script_path}: {exc}\n")
+                return
+
+            for line in process.stdout:
+                if self._stop_log.is_set():
+                    break
+                self._append_log(line)
+            process.wait()
+            self.progress.configure(value=100)
+            self._append_log("\n[DONE] Batch finished.\n")
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
         self.runner_thread.start()
