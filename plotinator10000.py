@@ -395,6 +395,14 @@ class DatasetDialog(ttkb.Toplevel):
         self.transient(master)
         self.grab_set()
 
+        status_owner: tk.Misc | None = master
+        while status_owner is not None and not hasattr(status_owner, "status_var"):
+            status_owner = getattr(status_owner, "master", None)
+        if status_owner is not None and isinstance(getattr(status_owner, "status_var", None), tk.StringVar):
+            self.status_var = status_owner.status_var  # type: ignore[assignment]
+        else:
+            self.status_var = tk.StringVar(self, value="Idle")
+
         data = copy.deepcopy(dataset) if dataset else {}
         columns = (data.get("data_source", {}) or {}).get("columns", {})
         style = data.get("style", {}) if isinstance(data.get("style"), dict) else {}
