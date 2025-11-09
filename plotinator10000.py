@@ -600,6 +600,7 @@ class DatasetDialog(ttkb.Toplevel):
                         self._set_status("Batch failed")
             finally:
                 self.runner_thread = None
+                self._stop_log.clear()
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
         self.runner_thread.start()
@@ -625,22 +626,22 @@ class DatasetDialog(ttkb.Toplevel):
 
     # ------------------------------------------------------------------
     def _stop_runner_thread(self) -> None:
-        """Request cancellation of the in-process engine runner and drain events."""
+        """Request cancellation of the in-process engine runner without blocking."""
 
-        self._stop_log.set()
         thread = self.runner_thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join()
+        if thread and thread.is_alive():
+            self._stop_log.set()
+            if thread is not threading.current_thread():
+                self._set_status("Cancelling batch…")
+            if self._event_queue is not None:
+                # Ensure any pending engine events are processed promptly.
+                self._poll_events()
+            return
+
+        # No active runner thread – reset cancellation state immediately.
         self.runner_thread = None
-        queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
-        self._event_queue = None
-        if queued_events is not None:
-            try:
-                while True:
-                    event = queued_events.get_nowait()
-                    self._handle_engine_event(event)
-            except queue.Empty:
-                pass
+        if self._event_queue is not None:
+            self._poll_events()
         self._stop_log.clear()
 
     # ------------------------------------------------------------------
