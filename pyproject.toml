@@ -30,6 +30,7 @@ dependencies = [
 yaml = ["pyyaml>=6.0"]
 dev = [
     "pytest>=7.4",
+    "pytest-cov>=4.1",
     "ruff>=0.2",
     "build>=1.2.1"
 ]
@@ -61,3 +62,7 @@ py-modules = [
 [tool.ruff]
 select = ["E", "F", "I", "B"]
 line-length = 100
+
+[tool.pytest.ini_options]
+addopts = "--cov=plot_manager --cov=reports --cov-report=term-missing"
+testpaths = ["tests"]
