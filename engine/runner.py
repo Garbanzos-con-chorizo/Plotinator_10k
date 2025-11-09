@@ -8,6 +8,9 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict
 
+from reports.markdown_builder import write_markdown_report
+from reports.pdf_exporter import export_pdf
+
 from .config import normalize_plots
 from .data_pipeline import prepare_datafile
 from .script_builder import (
@@ -58,10 +61,21 @@ class _EventDispatcher:
             print(f"[OK] Finished: {event.get('title', 'Unknown plot')}")
         elif etype == "plot-error":
             print(f"[X] Error in one plot: {event.get('error')}")
+        elif etype == "report-markdown-ready":
+            print(f"[REPORT] Markdown saved to: {event.get('markdown_path')}")
+        elif etype == "report-exported":
+            fmt = event.get("format", "pdf")
+            print(f"[REPORT] {fmt.upper()} exported to: {event.get('pdf_path')}")
+        elif etype == "report-error":
+            stage = event.get("stage", "report")
+            print(f"[WARN] Report {stage} failed: {event.get('error')}")
         elif etype == "job-complete":
             results_path = event.get("results_path", "")
             if results_path:
                 print(f"\n[COMPLETE] All fits complete. Results saved to:\n{results_path}")
+            pdf_path = event.get("pdf_path")
+            if pdf_path:
+                print(f"[REPORT] PDF exported to: {pdf_path}")
         elif etype == "job-error":
             print(f"[X] {event.get('error')}")
 
@@ -275,12 +289,44 @@ def run_job(
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
 
+        markdown_path: str | None = None
+        pdf_path: str | None = None
+
+        try:
+            markdown_path = str(write_markdown_report(json_path))
+            dispatcher.emit(
+                "report-markdown-ready",
+                markdown_path=markdown_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface via events only
+            dispatcher.emit(
+                "report-error",
+                stage="markdown",
+                error=str(exc),
+            )
+        else:
+            try:
+                pdf_path = str(export_pdf(markdown_path))
+                dispatcher.emit(
+                    "report-exported",
+                    pdf_path=pdf_path,
+                    format="pdf",
+                )
+            except Exception as exc:  # noqa: BLE001 - surface via events only
+                dispatcher.emit(
+                    "report-error",
+                    stage="pdf",
+                    error=str(exc),
+                )
+
         dispatcher.emit(
             "job-complete",
             timestamp=ts,
             results=results,
             output_dir=base_output,
             results_path=json_path,
+            markdown_path=markdown_path,
+            pdf_path=pdf_path,
         )
 
         return {
@@ -288,6 +334,8 @@ def run_job(
             "results": results,
             "output_dir": base_output,
             "results_path": json_path,
+            "markdown_path": markdown_path,
+            "pdf_path": pdf_path,
         }
     except Exception as exc:
         dispatcher.emit("job-error", error=str(exc))

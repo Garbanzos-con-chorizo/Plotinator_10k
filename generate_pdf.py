@@ -1,158 +1,24 @@
-import json
+from __future__ import annotations
+
 import os
-import shutil
+from pathlib import Path
 
-import pypandoc
+from reports.markdown_builder import write_markdown_report
+from reports.pdf_exporter import export_pdf
 
-PANDOC_ENV_VAR = "PANDOC_PATH"
-
-
-def ensure_pandoc_available() -> str:
-    """Ensure a pandoc executable is available and return its path."""
-
-    env_path = os.environ.get(PANDOC_ENV_VAR)
-    if env_path:
-        env_path = os.path.abspath(env_path)
-        if os.path.isfile(env_path):
-            bin_dir = os.path.dirname(env_path)
-            os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
-            pypandoc.pandoc_path = env_path
-            print(f"[OK] Pandoc detected via {PANDOC_ENV_VAR}: {env_path}")
-            return env_path
-        else:
-            print(f"[WARN] {PANDOC_ENV_VAR} is set but points to a missing file: {env_path}")
-
-    try:
-        detected = pypandoc.get_pandoc_path()
-        print(f"[OK] Pandoc detected: {detected}")
-        return detected
-    except OSError:
-        pass
-
-    which_path = shutil.which("pandoc")
-    if which_path:
-        pypandoc.pandoc_path = which_path
-        print(f"[OK] Pandoc detected in PATH: {which_path}")
-        return which_path
-
-    raise RuntimeError(
-        "Pandoc executable not found. Install Pandoc or set the PANDOC_PATH environment variable to its location."
-    )
-
-
-ensure_pandoc_available()
 
 def generate_markdown_report(results_path: str, output_folder: str) -> str:
-    """Convert fit_results.json into a Markdown report."""
-    with open(results_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    """Convert ``fit_results.json`` into a Markdown report."""
+    markdown_path = write_markdown_report(
+        Path(results_path),
+        output_folder=Path(output_folder),
+    )
+    return str(markdown_path)
 
-    ts = data.get("timestamp", "")
-    md = [f"# Plotinator Batch Report", f"**Date:** {ts}", "\n---\n"]
 
-    for item in data.get("results", []):
-        title = item["title"]
-        formula = item["formula"]
-        md.append(f"## {title}")
-        md.append(f"**Formula:** `{formula}`  ")
-
-        # Parameters table
-        params = item.get("parameters", {})
-        if params:
-            md.append("**Parameters:**")
-            md.append("| Name | Value | Error |")
-            md.append("|------|-------:|------:|")
-            for name, vals in params.items():
-                md.append(f"| {name} | {vals['value']:.6g} | {vals['error']:.6g} |")
-        else:
-            md.append("_No parameters extracted._")
-
-        # Metrics
-        metrics = item.get("metrics")
-        if metrics:
-            md.append(
-                f"\n**Residual Metrics:**  \n"
-                f"Mean = {metrics['mean']:.4g} Std = {metrics['std']:.4g} RMSE = {metrics['rmse']:.4g}\n"
-            )
-
-        data_source = item.get("data_source") or {}
-        if data_source:
-            md.append("\n**Data Source:**")
-            source_path = data_source.get("path", "")
-            if source_path:
-                md.append(f"- Path: `{source_path}`")
-            columns = data_source.get("columns") or {}
-            if columns:
-                base_cols = []
-                if columns.get("x"):
-                    base_cols.append(f"x → col {columns['x']}")
-                if columns.get("y"):
-                    base_cols.append(f"y → col {columns['y']}")
-                if base_cols:
-                    md.append(f"- Columns: {', '.join(base_cols)}")
-                if columns.get("error"):
-                    md.append(f"- Error column: col {columns['error']}")
-                if columns.get("weight"):
-                    md.append(f"- Weight column: col {columns['weight']}")
-            before = data_source.get("rows_before")
-            after = data_source.get("rows_after")
-            if before is not None and after is not None:
-                md.append(f"- Rows: {after} / {before} used after preprocessing")
-            preprocessing = data_source.get("preprocessing") or []
-            if preprocessing:
-                md.append("- Preprocessing steps:")
-                for step in preprocessing:
-                    if step.get("type") == "filter":
-                        info = step.get("retained_rows")
-                        suffix = f" → {info} rows" if info is not None else ""
-                        md.append(f"  - Filter `{step['expression']}`{suffix}")
-                    else:
-                        md.append(f"  - Transform `{step['target']}` := `{step['expression']}`")
-
-        confidence = item.get("confidence_notes")
-        if confidence:
-            md.append(f"\n> {confidence}")
-
-        # Images
-        plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
-        res_path = item.get("residuals_plot")
-        md.append(f"![Plot]({plot_path})")
-        if res_path:
-            residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
-            md.append(f"![Residuals]({residuals_path})")
-
-        md.append("\n---\n")
-
-    markdown_text = "\n".join(md)
-    md_file = os.path.join(output_folder, "report.md")
-    with open(md_file, "w", encoding="utf-8") as f:
-        f.write(markdown_text)
-    return md_file
-
-def convert_to_pdf(md_path):
-    md_path = os.path.abspath(md_path)
-    pdf_path = md_path.replace(".md", ".pdf")
-
-    # Move temporarily into the markdown folder to ensure image paths work
-    cwd = os.getcwd()
-    md_dir = os.path.dirname(md_path)
-    os.chdir(md_dir)
-
-    try:
-        pypandoc.convert_text(
-            open(md_path, "r", encoding="utf-8").read(),
-            "pdf",
-            format="md",
-            outputfile=pdf_path,
-            extra_args=["--pdf-engine=wkhtmltopdf", "--standalone"]
-        )
-        print(f"[OK] PDF exported successfully: {pdf_path}")
-    except Exception as e:
-        print(f"[ERROR] PDF generation failed: {e}")
-    finally:
-        os.chdir(cwd)
-
-    return pdf_path
+def convert_to_pdf(md_path: str) -> str:
+    pdf_path = export_pdf(md_path)
+    return str(pdf_path)
 
 
 def main():
