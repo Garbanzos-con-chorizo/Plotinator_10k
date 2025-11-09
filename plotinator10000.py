@@ -117,7 +117,7 @@ class PlotinatorApp(ttkb.Window):
             with open(CONFIG_PATH, "r", encoding="utf-8") as f:
                 raw = json.load(f)
         except Exception as e:
-            self.show_toast("Config error", f"Could not read config.json:\n{e}" , level="error")
+            self.show_toast("Config error", f"Could not read config.json:\n{e}", level="error")
             return
 
         # If it already has 'fits', use it
@@ -147,7 +147,11 @@ class PlotinatorApp(ttkb.Window):
 
         else:
             # Unknown schema; keep default empty fits and warn
-            self.show_toast("Config warning", "config.json has no 'fits' or 'plots'. Starting with an empty list.",level="warning")
+            self.show_toast(
+                "Config warning",
+                "config.json has no 'fits' or 'plots'. Starting with an empty list.",
+                level="warning",
+            )
 
         for fit in self.config_data.get("fits", []):
             self.ensure_fit_defaults(fit)
@@ -193,8 +197,8 @@ class PlotinatorApp(ttkb.Window):
         except tk.TclError:
             pass  # ignore scrolls after window is closed
 
-    def show_toast(self, message, level="info"):
-        """Display a single floating toast message (auto-destroys after 2s)."""
+    def show_toast(self, message, detail=None, level="info"):
+        """Display a floating toast message with optional detail text."""
         # Reuse or create toast window
         if hasattr(self, "_toast") and self._toast.winfo_exists():
             toast = self._toast
@@ -216,9 +220,11 @@ class PlotinatorApp(ttkb.Window):
         }
         color = colors.get(level, "#2E86C1")
 
+        text = message if detail is None else f"{message}\n{detail}"
+
         label = tk.Label(
             toast,
-            text=message,
+            text=text,
             bg=color,
             fg="white",
             font=("Segoe UI", 10, "bold"),
@@ -426,13 +432,13 @@ class PlotinatorApp(ttkb.Window):
         self.save_config()
         self.refresh_table()
         self.edit_fit(index)
-        self.show_toast("➕ New fit added",level="info")
+        self.show_toast("➕ New fit added", level="info")
 
     def delete_fit(self):
         """Delete the currently selected fit from the list."""
         item_id = self.tree.focus()
         if not item_id:
-            self.show_toast("⚠️ No fit selected" , level="warning")
+            self.show_toast("⚠️ No fit selected", level="warning")
             return
 
         index = self.tree.index(item_id)
