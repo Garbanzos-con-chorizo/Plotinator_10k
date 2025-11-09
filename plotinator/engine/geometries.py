@@ -117,13 +117,16 @@ class GeometryRegistry:
         self._strategies: Dict[str, GeometryStrategy] = {}
 
     def register(self, strategy: GeometryStrategy) -> None:
-        self._strategies[strategy.key] = strategy
+        key = (strategy.key or "").lower()
+        self._strategies[key] = strategy
 
-    def get(self, key: str) -> GeometryStrategy:
-        try:
-            return self._strategies[key]
-        except KeyError as exc:
-            raise KeyError(f"Unknown geometry '{key}'") from exc
+    def get(self, key: str, *, default: str | None = None) -> GeometryStrategy:
+        lookup = (key or "").lower()
+        if lookup in self._strategies:
+            return self._strategies[lookup]
+        if default is not None:
+            return self.get(default)
+        raise KeyError(f"Unknown geometry '{key}'")
 
     def all(self) -> Iterable[GeometryStrategy]:
         return self._strategies.values()

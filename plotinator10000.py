@@ -148,11 +148,8 @@ class PlotinatorApp(ttkb.Window):
         # Ensure geometry defaults
         for fit in self.config_data.get("fits", []):
             geom_key = (fit.get("geometry") or "line").lower()
-            try:
-                strategy = geometry_registry.get(geom_key)
-            except KeyError:
-                strategy = geometry_registry.get("line")
-                geom_key = "line"
+            strategy = geometry_registry.get(geom_key, default="line")
+            geom_key = strategy.key
             fit["geometry"] = geom_key
             try:
                 fit["geometry_options"] = strategy.normalize_options(fit.get("geometry_options"))
@@ -184,7 +181,7 @@ class PlotinatorApp(ttkb.Window):
 
     def _geometry_label(self, key):
         try:
-            return geometry_registry.get((key or "line").lower()).label
+            return geometry_registry.get((key or "line"), default="line").label
         except KeyError:
             return key or "Curve Fit"
 
@@ -441,12 +438,9 @@ class PlotinatorApp(ttkb.Window):
             geometry_option_vars.clear()
             for widget in options_frame.winfo_children():
                 widget.destroy()
-            try:
-                strategy = geometry_registry.get(geometry_var.get())
-            except KeyError:
-                strategy = geometry_registry.get("line")
-                geometry_var.set("line")
-                geometry_label_var.set(self._geometry_label("line"))
+            strategy = geometry_registry.get(geometry_var.get(), default="line")
+            geometry_var.set(strategy.key)
+            geometry_label_var.set(strategy.label)
             existing = fit.get("geometry_options", {})
             if fit.get("geometry") != geometry_var.get():
                 existing = {}
@@ -545,12 +539,8 @@ class PlotinatorApp(ttkb.Window):
             fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
 
             selected_geometry = geometry_var.get()
-            try:
-                strategy = geometry_registry.get(selected_geometry)
-            except KeyError:
-                strategy = geometry_registry.get("line")
-                selected_geometry = "line"
-            fit["geometry"] = selected_geometry
+            strategy = geometry_registry.get(selected_geometry, default="line")
+            fit["geometry"] = strategy.key
 
             raw_options = {name: var.get() for name, var in geometry_option_vars.items()}
             try:

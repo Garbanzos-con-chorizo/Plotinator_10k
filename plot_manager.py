@@ -123,7 +123,7 @@ def generate_gnuplot_code(
     cfg: dict, out_plot: str | None, out_residuals: str | None = None
 ) -> str:
     geometry_key = cfg.get("geometry", "line")
-    strategy = geometry_registry.get(geometry_key)
+    strategy = geometry_registry.get(geometry_key, default="line")
     helpers = {
         "estimate_initial_params": estimate_initial_params,
         "abspath": lambda path: os.path.abspath(path).replace("\\", "/"),
@@ -162,7 +162,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     base_dir = os.path.dirname(os.path.abspath(config_path))
     normalized: list[dict] = []
     for fit in fits:
-        geometry_key = (fit.get("geometry") or "line").lower()
+        geometry_key = fit.get("geometry") or "line"
         try:
             geometry = geometry_registry.get(geometry_key)
         except KeyError as exc:
@@ -239,7 +239,7 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
     import os
 
-    geometry = geometry_registry.get(plot_cfg.get("geometry", "line"))
+    geometry = geometry_registry.get(plot_cfg.get("geometry", "line"), default="line")
     helpers = {
         "estimate_initial_params": estimate_initial_params,
         "abspath": lambda path: os.path.abspath(path).replace("\\", "/"),
