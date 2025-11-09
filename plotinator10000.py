@@ -10,7 +10,7 @@ import threading
 import tkinter as tk
 from typing import Any
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
@@ -99,7 +99,9 @@ class PlotinatorApp(ttkb.Window):
         try:
             self.job = load_config_file(self.config_path)
         except ConfigError as exc:
-            messagebox.showerror("Config error", str(exc))
+            error_message = f"Failed to load config: {exc}"
+            self._append_log(f"[CONFIG] {error_message}\n")
+            self.show_toast(error_message, level="error")
             self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
             return
         self.refresh_table()
@@ -116,7 +118,9 @@ class PlotinatorApp(ttkb.Window):
         try:
             self.job = load_config(mapping, base_path=self.job.base_path)
         except ConfigError as exc:
-            messagebox.showerror("Config error", str(exc))
+            error_message = f"Invalid configuration change: {exc}"
+            self._append_log(f"[CONFIG] {error_message}\n")
+            self.show_toast(error_message, level="error")
             return False
         self.refresh_table()
         return True
@@ -466,6 +470,15 @@ class DatasetDialog(ttkb.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _on_save(self) -> None:
+        def notify(message: str, level: str = "error", focus_widget: tk.Widget | None = None) -> None:
+            target: tk.Misc | None = self
+            while target is not None and not hasattr(target, "show_toast"):
+                target = getattr(target, "master", None)
+            if target is not None and hasattr(target, "show_toast"):
+                target.show_toast(message, level=level)
+            if focus_widget is not None:
+                focus_widget.focus_set()
+
         label = self.label_entry.get().strip() or "Dataset"
         pane_value = self.pane_entry.get().strip()
         pane_payload: dict[str, int | str] = {}
@@ -478,11 +491,17 @@ class DatasetDialog(ttkb.Toplevel):
             pane_payload["pane_index"] = 1
 
         path = self.path_entry.get().strip()
+        x_value_raw = (self.x_spin.get() or "").strip()
+        y_value_raw = (self.y_spin.get() or "").strip()
         try:
-            x_col = int(self.x_spin.get() or 1)
-            y_col = int(self.y_spin.get() or 2)
+            x_col = int(x_value_raw or 1)
         except ValueError:
-            messagebox.showerror("Invalid input", "X and Y columns must be integers.")
+            notify("X column must be an integer.", focus_widget=self.x_spin)
+            return
+        try:
+            y_col = int(y_value_raw or 2)
+        except ValueError:
+            notify("Y column must be an integer.", focus_widget=self.y_spin)
             return
 
         error_col = self.error_entry.get().strip()
@@ -507,10 +526,7 @@ class DatasetDialog(ttkb.Toplevel):
                 if not isinstance(preprocessing, list):
                     raise ValueError
             except (json.JSONDecodeError, ValueError):
-                messagebox.showerror(
-                    "Invalid preprocessing",
-                    "Preprocessing must be a JSON list (e.g., []).",
-                )
+                notify("Preprocessing must be a JSON list (e.g., []).", focus_widget=self.preprocess_text)
                 return
         else:
             preprocessing = []
@@ -533,7 +549,9 @@ class DatasetDialog(ttkb.Toplevel):
     # ------------------------------------------------------------------
     def run_batch(self) -> None:
         if self.runner_thread and self.runner_thread.is_alive():
-            messagebox.showinfo("Batch running", "A batch is already running")
+            info_message = "Batch already running."
+            self._append_log(f"[WARN] {info_message}\n")
+            self.show_toast(info_message, level="warning")
             return
 
         self.save_config()
@@ -664,8 +682,7 @@ class DatasetDialog(ttkb.Toplevel):
         if etype == "job-error":
             error_msg = event.get("error", "Batch failed")
             self._append_log(f"[X] {error_msg}\n")
-            messagebox.showerror("Batch failed", error_msg)
-            self.show_toast("Batch failed", level="error")
+            self.show_toast(error_msg, level="error")
             return
 
         if etype == "job-thread-exit":
@@ -693,11 +710,15 @@ class DatasetDialog(ttkb.Toplevel):
     def open_latest_report(self) -> None:
         outputs = Path("outputs")
         if not outputs.exists():
-            messagebox.showinfo("No outputs", "No outputs folder found yet.")
+            info_message = "Outputs folder not found yet. Run a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
             return
         latest = max(outputs.glob("*/fit_results.json"), default=None, key=lambda p: p.stat().st_mtime)
         if not latest:
-            messagebox.showinfo("No report", "Generate a batch before opening a report.")
+            info_message = "No reports available yet. Generate a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
             return
         latest_dir = latest.parent
         pdf_report = latest_dir / "report.pdf"
