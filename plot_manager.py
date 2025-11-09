@@ -6,6 +6,8 @@ import re
 import math
 import numpy as np
 
+from plotinator.config.style import StyleConfig
+
 PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
                       re.MULTILINE)
 
@@ -120,16 +122,68 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
 def generate_gnuplot_code(
     cfg: dict, out_plot: str | None, out_residuals: str | None = None
 ) -> str:
-    style = cfg.get("style", {})
-    pt  = style.get("point_type", 7)
-    lw  = style.get("line_width", 2)
-    col = style.get("line_color", "black")
+    raw_style = cfg.get("style_model") or cfg.get("style")
+    style_cfg = (
+        raw_style
+        if isinstance(raw_style, StyleConfig)
+        else StyleConfig.from_dict(raw_style, fallback_color=cfg.get("color"))
+    )
 
-    formula  = cfg["fit_formula"]
-    params   = cfg["fit_params"]
+    pt = style_cfg.point_type
+    lw = style_cfg.line_width
+    col = style_cfg.line_color
+
+    formula = cfg["fit_formula"]
+    params = cfg["fit_params"]
     params_csv = ",".join(params)
     datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
-    use_err  = cfg.get("error_bars", False)
+    use_err = cfg.get("error_bars", False)
+
+    def _escape(text: str) -> str:
+        return (text or "").replace("\\", "\\\\").replace('"', '\"')
+
+    def _style_commands(title: str, x_label: str, y_label: str, *, force_linear_y: bool = False) -> str:
+        lines: list[str] = [
+            "set encoding utf8",
+            f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\"",
+            f"set title \"{_escape(title)}\" font \",{style_cfg.title_font_size}\"",
+            f"set xlabel \"{_escape(x_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set ylabel \"{_escape(y_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set xtics font \",{style_cfg.tick_font_size}\"",
+            f"set ytics font \",{style_cfg.tick_font_size}\"",
+        ]
+
+        if style_cfg.x_scale == "log":
+            lines.append("set logscale x")
+        else:
+            lines.append("unset logscale x")
+
+        if not force_linear_y and style_cfg.y_scale == "log":
+            lines.append("set logscale y")
+        else:
+            lines.append("unset logscale y")
+
+        if style_cfg.x_tick_format:
+            lines.append(f"set format x \"{_escape(style_cfg.x_tick_format)}\"")
+        else:
+            lines.append("set format x")
+
+        if style_cfg.y_tick_format and not force_linear_y:
+            lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
+        else:
+            lines.append("set format y")
+
+        if style_cfg.grid:
+            lines.append(f"set grid {style_cfg.grid_layer}")
+        else:
+            lines.append("unset grid")
+
+        if style_cfg.legend_visible and not force_linear_y:
+            lines.append(style_cfg.legend_gnuplot_clause())
+        else:
+            lines.append("unset key")
+
+        return "\n".join(lines)
 
     # Compute smart initial guesses
     guesses = estimate_initial_params(datafile, formula, params)
@@ -148,11 +202,7 @@ def generate_gnuplot_code(
 
 
     code = f"""
-set encoding utf8
-set terminal pngcairo size 800,600
-set title "{cfg['title']}"
-set xlabel "X"
-set ylabel "Y"
+{_style_commands(cfg['title'], style_cfg.axis_label_with_unit('x'), style_cfg.axis_label_with_unit('y'))}
 
 set fit errorvariables
 {init_lines}
@@ -181,10 +231,7 @@ fit f(x) "{datafile}" via {params_csv}
     if out_residuals:
         code += f"""
 set output "{out_residuals}"
-set title "Residuals — {cfg['title']}"
-set xlabel "X"
-set ylabel "Residual (y - f(x))"
-set grid back
+{_style_commands(f"Residuals — {cfg['title']}", style_cfg.axis_label_with_unit('x'), "Residual (y - f(x))", force_linear_y=True)}
 plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
      0 with lines notitle lc rgb "gray"
 unset output
@@ -229,11 +276,12 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         if not datafile or not os.path.exists(datafile):
             raise FileNotFoundError(f"Data file not found for fit '{fit.get('title', 'Untitled')}': {datafile}")
 
-        style = fit.get("style", {}).copy()
-        if "color" in fit and fit["color"]:
-            style.setdefault("line_color", fit["color"])
-        elif "line_color" not in style:
-            style["line_color"] = "#1f77b4"
+        style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
+        if fit.get("color"):
+            style_cfg.line_color = fit["color"]
+        else:
+            fit["color"] = style_cfg.line_color
+        style = style_cfg.to_dict()
 
         initial_params = {}
         for key in params:
@@ -249,6 +297,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                 "datafile": datafile,
                 "residuals": bool(fit.get("residuals", True)),
                 "style": style,
+                "style_model": style_cfg,
                 "fit_params": params,
                 "initial_params": initial_params,
                 "error_bars": bool(fit.get("error_bars", False)),

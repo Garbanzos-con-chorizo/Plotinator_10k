@@ -6,6 +6,8 @@ import shutil
 import re
 from ttkbootstrap.constants import *
 
+from plotinator.config import StyleConfig
+
 
 CONFIG_PATH = "config.json"
 
@@ -117,6 +119,7 @@ class PlotinatorApp(ttkb.Window):
         # If it already has 'fits', use it
         if isinstance(raw, dict) and isinstance(raw.get("fits"), list):
             self.config_data = {"fits": raw["fits"]}
+            self._ensure_style_defaults()
 
         # Backwards compatibility: migrate 'plots' -> 'fits'
         elif isinstance(raw, dict) and isinstance(raw.get("plots"), list):
@@ -131,6 +134,7 @@ class PlotinatorApp(ttkb.Window):
                     "color":     (p.get("style", {}) or {}).get("line_color", "#1f77b4"),
                 })
             self.config_data = {"fits": migrated}
+            self._ensure_style_defaults()
 
             # (Optional) write back the migrated file so future loads are clean
             try:
@@ -161,6 +165,12 @@ class PlotinatorApp(ttkb.Window):
             datafile = os.path.basename(fit.get("datafile", ""))  # cleaner filename only
             residuals = "✅" if fit.get("residuals", False) else "❌"
             self.tree.insert("", "end", values=(title, formula, datafile, residuals))
+
+    def _ensure_style_defaults(self):
+        for fit in self.config_data.get("fits", []):
+            style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
+            fit["style"] = style_cfg.to_dict()
+            fit["color"] = style_cfg.line_color
 
 
     #-------- Utilities ------------------
@@ -249,7 +259,8 @@ class PlotinatorApp(ttkb.Window):
             "datafile": "",
             "residuals": True,
             "color": "#1f77b4",
-            "parameters": {"a": 1.0, "b": 1.0}
+            "parameters": {"a": 1.0, "b": 1.0},
+            "style": StyleConfig().to_dict(),
         }
         self.config_data.setdefault("fits", []).append(new_fit)
         index = len(self.config_data["fits"]) - 1
@@ -278,6 +289,7 @@ class PlotinatorApp(ttkb.Window):
     def edit_fit(self, index):
         """Open the edit window for a specific fit index."""
         fit = self.config_data["fits"][index]
+        style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
         edit_win = tk.Toplevel(self)
         edit_win.title(f"Edit Fit #{index + 1}")
         edit_win.geometry("600x600")
@@ -367,19 +379,106 @@ class PlotinatorApp(ttkb.Window):
         residuals_var = tk.BooleanVar(value=fit.get("residuals", True))
         tk.Checkbutton(scrollable_frame, text="Generate residuals plot", variable=residuals_var).pack(anchor="w", padx=10, pady=5)
 
-        # --- Color
-        tk.Label(scrollable_frame, text="Color:").pack(anchor="w", padx=10, pady=2)
-        color_var = tk.StringVar(value=fit.get("color", "#1f77b4"))
+        # --- Axes options
+        x_label_var = tk.StringVar(value=style_cfg.x_label)
+        x_unit_var = tk.StringVar(value=style_cfg.x_unit)
+        x_scale_var = tk.StringVar(value=style_cfg.x_scale)
+        x_tick_format_var = tk.StringVar(value=style_cfg.x_tick_format)
+        y_label_var = tk.StringVar(value=style_cfg.y_label)
+        y_unit_var = tk.StringVar(value=style_cfg.y_unit)
+        y_scale_var = tk.StringVar(value=style_cfg.y_scale)
+        y_tick_format_var = tk.StringVar(value=style_cfg.y_tick_format)
+
+        axes_frame = tk.LabelFrame(scrollable_frame, text="Axes")
+        axes_frame.pack(fill="x", padx=10, pady=8)
+        for col in (1, 3):
+            axes_frame.columnconfigure(col, weight=1)
+
+        tk.Label(axes_frame, text="X label").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=x_label_var).grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+        tk.Label(axes_frame, text="Unit").grid(row=0, column=2, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=x_unit_var).grid(row=0, column=3, sticky="ew", padx=5, pady=2)
+
+        tk.Label(axes_frame, text="X scale").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Combobox(axes_frame, textvariable=x_scale_var, values=list(StyleConfig.VALID_SCALES), state="readonly").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+        tk.Label(axes_frame, text="Tick format").grid(row=1, column=2, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=x_tick_format_var).grid(row=1, column=3, sticky="ew", padx=5, pady=2)
+
+        tk.Label(axes_frame, text="Y label").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=y_label_var).grid(row=2, column=1, sticky="ew", padx=5, pady=2)
+        tk.Label(axes_frame, text="Unit").grid(row=2, column=2, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=y_unit_var).grid(row=2, column=3, sticky="ew", padx=5, pady=2)
+
+        tk.Label(axes_frame, text="Y scale").grid(row=3, column=0, sticky="w", padx=5, pady=2)
+        ttk.Combobox(axes_frame, textvariable=y_scale_var, values=list(StyleConfig.VALID_SCALES), state="readonly").grid(row=3, column=1, sticky="ew", padx=5, pady=2)
+        tk.Label(axes_frame, text="Tick format").grid(row=3, column=2, sticky="w", padx=5, pady=2)
+        tk.Entry(axes_frame, textvariable=y_tick_format_var).grid(row=3, column=3, sticky="ew", padx=5, pady=2)
+
+        # --- Grid & legend
+        grid_var = tk.BooleanVar(value=style_cfg.grid)
+        grid_layer_var = tk.StringVar(value=style_cfg.grid_layer)
+        legend_visible_var = tk.BooleanVar(value=style_cfg.legend_visible)
+        legend_position_var = tk.StringVar(value=style_cfg.legend_position)
+
+        grid_frame = tk.LabelFrame(scrollable_frame, text="Grid & legend")
+        grid_frame.pack(fill="x", padx=10, pady=8)
+        grid_frame.columnconfigure(1, weight=1)
+
+        tk.Checkbutton(grid_frame, text="Show grid", variable=grid_var).grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        ttk.Combobox(grid_frame, textvariable=grid_layer_var, values=list(StyleConfig.VALID_GRID_LAYERS), state="readonly").grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+
+        tk.Checkbutton(grid_frame, text="Show legend", variable=legend_visible_var).grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Combobox(grid_frame, textvariable=legend_position_var, values=list(StyleConfig.VALID_LEGEND_POSITIONS.keys()), state="readonly").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
+
+        # --- Fonts
+        font_family_var = tk.StringVar(value=style_cfg.font_family)
+        font_size_var = tk.IntVar(value=style_cfg.font_size)
+        title_font_size_var = tk.IntVar(value=style_cfg.title_font_size)
+        axis_font_size_var = tk.IntVar(value=style_cfg.axis_label_font_size)
+        tick_font_size_var = tk.IntVar(value=style_cfg.tick_font_size)
+
+        fonts_frame = tk.LabelFrame(scrollable_frame, text="Fonts")
+        fonts_frame.pack(fill="x", padx=10, pady=8)
+        fonts_frame.columnconfigure(1, weight=1)
+
+        tk.Label(fonts_frame, text="Family").grid(row=0, column=0, sticky="w", padx=5, pady=2)
+        tk.Entry(fonts_frame, textvariable=font_family_var).grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+
+        tk.Label(fonts_frame, text="Base size").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=font_size_var, width=6).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+        tk.Label(fonts_frame, text="Title size").grid(row=1, column=2, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(fonts_frame, from_=8, to=64, textvariable=title_font_size_var, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=2)
+
+        tk.Label(fonts_frame, text="Axis labels").grid(row=2, column=0, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=axis_font_size_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
+        tk.Label(fonts_frame, text="Tick labels").grid(row=2, column=2, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=tick_font_size_var, width=6).grid(row=2, column=3, sticky="w", padx=5, pady=2)
+
+        # --- Line & point appearance
+        color_var = tk.StringVar(value=style_cfg.line_color)
+        line_width_var = tk.DoubleVar(value=style_cfg.line_width)
+        point_type_var = tk.IntVar(value=style_cfg.point_type)
+
+        appearance_frame = tk.LabelFrame(scrollable_frame, text="Line & points")
+        appearance_frame.pack(fill="x", padx=10, pady=8)
+        appearance_frame.columnconfigure(1, weight=1)
+
+        tk.Label(appearance_frame, text="Line color").grid(row=0, column=0, sticky="w", padx=5, pady=2)
 
         def choose_color():
             color = colorchooser.askcolor(color_var.get())[1]
             if color:
                 color_var.set(color)
 
-        frame_color = tk.Frame(scrollable_frame)
-        frame_color.pack(fill="x", padx=10)
-        tk.Entry(frame_color, textvariable=color_var, width=10).pack(side="left")
-        tk.Button(frame_color, text="🎨", command=choose_color).pack(side="left", padx=5)
+        color_entry = tk.Entry(appearance_frame, textvariable=color_var)
+        color_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
+        tk.Button(appearance_frame, text="🎨", command=choose_color).grid(row=0, column=2, padx=5, pady=2)
+
+        tk.Label(appearance_frame, text="Line width").grid(row=1, column=0, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(appearance_frame, from_=0.5, to=10.0, increment=0.5, textvariable=line_width_var, width=6).grid(row=1, column=1, sticky="w", padx=5, pady=2)
+
+        tk.Label(appearance_frame, text="Point type").grid(row=1, column=2, sticky="w", padx=5, pady=2)
+        ttk.Spinbox(appearance_frame, from_=0, to=15, textvariable=point_type_var, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=2)
 
         # --- Parameters ---
         tk.Label(scrollable_frame, text="Parameters:").pack(anchor="w", padx=10, pady=(10, 0))
@@ -426,12 +525,39 @@ class PlotinatorApp(ttkb.Window):
             fit["formula"] = formula_var.get()
             fit["datafile"] = data_var.get()
             fit["residuals"] = residuals_var.get()
-            fit["color"] = color_var.get()
+            fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
+
+            style_payload = {
+                "x_label": x_label_var.get().strip(),
+                "x_unit": x_unit_var.get().strip(),
+                "x_scale": x_scale_var.get(),
+                "x_tick_format": x_tick_format_var.get().strip(),
+                "y_label": y_label_var.get().strip(),
+                "y_unit": y_unit_var.get().strip(),
+                "y_scale": y_scale_var.get(),
+                "y_tick_format": y_tick_format_var.get().strip(),
+                "grid": grid_var.get(),
+                "grid_layer": grid_layer_var.get(),
+                "legend_visible": legend_visible_var.get(),
+                "legend_position": legend_position_var.get(),
+                "font_family": font_family_var.get().strip() or style_cfg.font_family,
+                "font_size": font_size_var.get(),
+                "title_font_size": title_font_size_var.get(),
+                "axis_label_font_size": axis_font_size_var.get(),
+                "tick_font_size": tick_font_size_var.get(),
+                "line_color": color_var.get().strip() or style_cfg.line_color,
+                "line_width": line_width_var.get(),
+                "point_type": point_type_var.get(),
+            }
+
+            new_style = StyleConfig.from_dict(style_payload)
+            fit["style"] = new_style.to_dict()
+            fit["color"] = new_style.line_color
+
             self.save_config()
             self.refresh_table()
             self.show_toast(f"Saved '{fit['title']}'", level="info")
             edit_win.destroy()
-            fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
 
 
         tk.Button(scrollable_frame, text="💾 Save", command=save_and_close, bg="#4CAF50", fg="white").pack(pady=15)
