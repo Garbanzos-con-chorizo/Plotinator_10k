@@ -118,6 +118,38 @@ Each layer communicates through clear interfaces:
      report.
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).
 
+### Beta build retrieval & validation
+
+Tagged builds trigger the **Windows release packaging** workflow, which publishes two artefacts
+under the run's *Artifacts* panel:
+
+- `plotinator-bundle-<tag>` – zipped PyInstaller output from `dist/plotinator-bundle/`.
+- `plotinator-msi-<tag>` – the WiX-generated installer from `dist/`.
+
+To download them, either use the GitHub web UI or fetch via the CLI:
+
+```bash
+gh run download --repo <org>/Plotinator_10k --name plotinator-bundle-<tag>
+gh run download --repo <org>/Plotinator_10k --name plotinator-msi-<tag>
+```
+
+Validate the artefacts before handing them to external testers:
+
+1. Verify file integrity on Windows by computing hashes and comparing against the workflow summary.
+   ```powershell
+   Get-FileHash .\plotinator-bundle-<tag>.zip -Algorithm SHA256
+   Get-FileHash .\plotinator-<tag>.msi -Algorithm SHA256
+   ```
+2. Provision a clean Windows VM (no cached dependencies) and extract the bundle.
+   - Launch `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` to ensure the
+     embedded Python environment loads.
+   - Run the sample configuration shipped in `config.json` to confirm plotting, reporting, and
+     dependency discovery still work end-to-end.
+3. Install the MSI on the same VM and repeat the smoke test to confirm Start Menu shortcuts and file
+   associations behave as expected.
+
+For deeper packaging diagnostics, see the [Installer Guide](docs/INSTALLER.md).
+
 ## Packaging Troubleshooting
 
 Common packaging failures and how to recover are documented in the [Installer Guide](docs/INSTALLER.md#packaging-troubleshooting).
