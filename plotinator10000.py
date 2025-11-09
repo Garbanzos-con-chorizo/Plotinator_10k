@@ -96,7 +96,7 @@ class PlotinatorApp(ttkb.Window):
     
     # --- Config management -------------------------------------------------
     def load_config(self):
-    # Always start with a sane default
+        # Always start with a sane default
         self.config_data = {"fits": []}
 
         if not os.path.exists(CONFIG_PATH):
@@ -141,7 +141,11 @@ class PlotinatorApp(ttkb.Window):
 
         else:
             # Unknown schema; keep default empty fits and warn
-            self.show_toast("Config warning", "config.json has no 'fits' or 'plots'. Starting with an empty list.",level="warning")
+            self.show_toast(
+                "Config warning",
+                "config.json has no 'fits' or 'plots'. Starting with an empty list.",
+                level="warning",
+            )
 
         for fit in self.config_data.get("fits", []):
             self._ensure_data_source(fit)
@@ -305,7 +309,7 @@ class PlotinatorApp(ttkb.Window):
         self.save_config()
         self.refresh_table()
         self.edit_fit(index)
-        self.show_toast("➕ New fit added",level="info")
+        self.show_toast("➕ New fit added", level="info")
 
     def delete_fit(self):
         """Delete the currently selected fit from the list."""
