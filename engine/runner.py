@@ -1,0 +1,218 @@
+from __future__ import annotations
+
+import copy
+import datetime
+import json
+import os
+import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+
+from .config import normalize_plots
+from .data_pipeline import prepare_datafile
+from .script_builder import (
+    compute_residual_metrics,
+    generate_gnuplot_code,
+    parse_fit_output,
+)
+
+__all__ = [
+    "run_gnuplot_script",
+    "process_plot",
+    "run_batch",
+]
+
+
+def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
+    """Run a gnuplot script inside *workdir* and return combined stdout/stderr."""
+
+    os.makedirs(workdir, exist_ok=True)
+    script_path = os.path.join(workdir, "temp_plot.plt")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(gnuplot_code)
+
+    result = subprocess.run(
+        ["gnuplot", script_path],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    with open(os.path.join(workdir, "log.txt"), "w", encoding="utf-8") as lf:
+        lf.write(output)
+
+    return output
+
+
+def _normalize_dataset_for_processing(dataset: dict, base_plot_dir: str, index: int) -> dict:
+    ds_copy = copy.deepcopy(dataset)
+    dataset_dir = os.path.join(base_plot_dir, f"dataset_{index}")
+    os.makedirs(dataset_dir, exist_ok=True)
+
+    prep_cfg = {
+        "data_source": ds_copy.get("data_source"),
+        "datafile": ds_copy.get("datafile"),
+    }
+    prep_info = dict(prepare_datafile(prep_cfg, dataset_dir))
+    prep_info["path"] = os.path.abspath(prep_info["path"]).replace("\\", "/")
+
+    ds_copy["datafile"] = prep_info["path"]
+    ds_copy["prepared_data"] = prep_info
+
+    ds_data_source = copy.deepcopy(ds_copy.get("data_source", {}))
+    if ds_data_source.get("path"):
+        ds_data_source["path"] = os.path.abspath(ds_data_source["path"]).replace("\\", "/")
+    ds_copy["data_source"] = ds_data_source
+
+    return ds_copy
+
+
+def _dataset_report_entry(dataset: dict) -> dict[str, Any]:
+    prep_info = dataset.get("prepared_data", {})
+    ds_data_source = dataset.get("data_source", {})
+    return {
+        "label": dataset.get("label"),
+        "pane": dataset.get("pane"),
+        "pane_index": dataset.get("pane_index"),
+        "columns": dataset.get("column_map", {}),
+        "style": dataset.get("style", {}),
+        "data_source": ds_data_source,
+        "prepared_data": prep_info,
+    }
+
+
+def process_plot(plot_cfg: dict, base_output: str) -> dict:
+    """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
+
+    plot_cfg = copy.deepcopy(plot_cfg)
+    safe_title = plot_cfg["title"].replace(" ", "_")
+    plot_dir = os.path.join(base_output, f"plot_{safe_title}")
+    os.makedirs(plot_dir, exist_ok=True)
+
+    out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
+
+    datasets_cfg = list(plot_cfg.get("datasets") or [])
+    if not datasets_cfg:
+        datasets_cfg = [
+            {
+                "label": plot_cfg.get("title", "Dataset"),
+                "datafile": plot_cfg.get("datafile"),
+                "column_map": plot_cfg.get("column_map", {}),
+                "error_bars": plot_cfg.get("error_bars"),
+                "style_model": plot_cfg.get("style_model"),
+                "style": plot_cfg.get("style"),
+                "data_source": plot_cfg.get("data_source", {}),
+            }
+        ]
+
+    prepared_datasets: list[dict] = []
+    datasets_report: list[dict[str, Any]] = []
+
+    for idx, dataset in enumerate(datasets_cfg, start=1):
+        prepared = _normalize_dataset_for_processing(dataset, plot_dir, idx)
+        prepared_datasets.append(prepared)
+        datasets_report.append(_dataset_report_entry(prepared))
+
+    plot_cfg["datasets"] = prepared_datasets
+    primary_dataset = prepared_datasets[0]
+    data_prep = primary_dataset.get("prepared_data", {})
+    plot_cfg["datafile"] = primary_dataset["datafile"]
+    plot_cfg["data_source"] = primary_dataset.get(
+        "data_source", plot_cfg.get("data_source", {})
+    )
+    plot_cfg["column_map"] = primary_dataset.get(
+        "column_map", plot_cfg.get("column_map", {})
+    )
+
+    main_code = generate_gnuplot_code(plot_cfg, out_plot)
+    output_text = run_gnuplot_script(main_code, workdir=plot_dir)
+    params = parse_fit_output(output_text)
+
+    residuals_path: str | None
+    metrics: dict | None
+    if params and plot_cfg.get("residuals", True):
+        residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
+        metrics = compute_residual_metrics(
+            plot_cfg["datafile"], plot_cfg.get("column_map", {}), params, plot_cfg["fit_formula"]
+        )
+        resid_code = generate_gnuplot_code(
+            plot_cfg, out_plot=None, out_residuals=residuals_path
+        )
+        run_gnuplot_script(resid_code, workdir=plot_dir)
+    else:
+        residuals_path = None
+        metrics = None
+
+    column_map = plot_cfg.get("column_map", {})
+    confidence_notes = None
+    if column_map.get("error"):
+        confidence_notes = f"Fit weighted by error column {column_map['error']}"
+    elif column_map.get("weight"):
+        confidence_notes = f"Fit weighted by column {column_map['weight']}"
+
+    result = {
+        "title": plot_cfg["title"],
+        "formula": plot_cfg["fit_formula"],
+        "parameters": params,
+        "metrics": metrics,
+        "datafile": plot_cfg["datafile"],
+        "output_plot": out_plot,
+        "residuals_plot": residuals_path,
+        "data_source": {
+            "path": os.path.abspath(
+                plot_cfg.get("data_source", {}).get("path", plot_cfg["datafile"])
+            ).replace("\\", "/"),
+            "columns": column_map,
+            "rows_before": data_prep.get("rows_before"),
+            "rows_after": data_prep.get("rows_after"),
+            "preprocessing": data_prep.get("applied_steps", []),
+        },
+        "layout": plot_cfg.get("layout", {}),
+        "datasets": datasets_report,
+        "canvases": {
+            "combined": out_plot,
+            "residuals": residuals_path,
+        },
+        "confidence_notes": confidence_notes,
+    }
+
+    print(f"[OK] Finished: {plot_cfg['title']}")
+    return result
+
+
+def run_batch(config_path: str, *, max_workers: int = 4) -> dict[str, Any]:
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    plots = normalize_plots(cfg, config_path)
+
+    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_output = os.path.abspath(os.path.join("outputs", ts))
+    os.makedirs(base_output, exist_ok=True)
+
+    print(f"[RUN] Starting batch at {ts} ({len(plots)} plots)")
+
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(process_plot, plot_cfg, base_output) for plot_cfg in plots]
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as exc:  # noqa: BLE001 - propagate with logging
+                print(f"[X] Error in one plot: {exc}")
+
+    all_results = {"timestamp": ts, "results": results}
+    json_path = os.path.join(base_output, "fit_results.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+    print(f"\n[COMPLETE] All fits complete. Results saved to:\n{json_path}")
+
+    return {
+        "timestamp": ts,
+        "results": results,
+        "output_dir": base_output,
+        "results_path": json_path,
+    }
