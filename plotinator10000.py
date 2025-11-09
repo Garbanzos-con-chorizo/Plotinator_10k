@@ -600,6 +600,11 @@ class DatasetDialog(ttkb.Toplevel):
         toast.after(2500, toast.destroy)
 
 
-if __name__ == "__main__":
+def main() -> int:
     app = PlotinatorApp()
     app.mainloop()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
