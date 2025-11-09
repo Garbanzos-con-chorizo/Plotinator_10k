@@ -30,7 +30,8 @@ dependencies = [
 yaml = ["pyyaml>=6.0"]
 dev = [
     "pytest>=7.4",
-    "ruff>=0.2"
+    "ruff>=0.2",
+    "build>=1.2.1"
 ]
 
 [project.urls]
