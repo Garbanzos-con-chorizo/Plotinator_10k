@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plotinator-10k"
+version = "0.1.0"
+description = "Batch plotting, reporting, and GUI tooling for gnuplot-driven curve fits"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [
+    {name = "Plotinator Labs"}
+]
+keywords = ["gnuplot", "visualization", "curve fitting", "reports", "tkinter"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Visualization"
+]
+dependencies = [
+    "numpy>=1.24",
+    "ttkbootstrap>=1.10",
+    "pypandoc>=1.10"
+]
+
+[project.optional-dependencies]
+yaml = ["pyyaml>=6.0"]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.2"
+]
+
+[project.urls]
+Homepage = "https://github.com/plotinator-labs/Plotinator_10k"
+Repository = "https://github.com/plotinator-labs/Plotinator_10k"
+
+[project.scripts]
+plotinator-cli = "plot_manager:main"
+plotinator-gui = "plotinator10000:main"
+plotinator-report = "generate_pdf:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "engine",
+    "config",
+    "plotinator",
+]
+
+[tool.setuptools]
+py-modules = [
+    "plot_manager",
+    "plotinator10000",
+    "generate_pdf",
+]
+
+[tool.ruff]
+select = ["E", "F", "I", "B"]
+line-length = 100
