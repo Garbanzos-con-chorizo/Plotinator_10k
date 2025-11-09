@@ -1,948 +1,303 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import threading
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog, colorchooser, simpledialog
-import subprocess, os, json, threading, platform, webbrowser
-import ttkbootstrap as ttkb  # pip install ttkbootstrap
-import shutil
-import re
+from pathlib import Path
+from tkinter import filedialog, messagebox
+
+import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 
-
 CONFIG_PATH = "config.json"
 
+
 class PlotinatorApp(ttkb.Window):
-    def __init__(self):
+    """Simple desktop helper for editing Plotinator config files."""
+
+    def __init__(self) -> None:
         super().__init__(themename="superhero")
         self.title("Plotinator 100000")
-        self.geometry("1500x900")
+        self.geometry("1200x800")
         self.resizable(True, True)
 
-        self.folder = None
-        self.config_data = {}
+        self.style = ttkb.Style()
+        self.folder: Path | None = None
+        self.config_data: dict = {"fits": []}
+        self.runner_thread: threading.Thread | None = None
+        self._stop_log = threading.Event()
 
-        self.create_widgets()  # creates self.tree
-        self.tree.bind("<Double-1>", self.on_double_click)  # bind AFTER creation
+        self._create_widgets()
+        self.tree.bind("<Double-1>", self.on_double_click)
         self.load_config()
 
-
-    # --- UI Layout ---------------------------------------------------------
-    def create_widgets(self):
-        # --- Sidebar Accent (optional) ---
-        accent = ttkb.Frame(self, width=8, bootstyle="info")
-        accent.pack(side="left", fill="y")
-
-        # --- Header ---
-        header = ttkb.Frame(self, bootstyle="dark", padding=10)
+    # ------------------------------------------------------------------
+    def _create_widgets(self) -> None:
+        header = ttkb.Frame(self, padding=10)
         header.pack(fill="x")
+        ttkb.Label(header, text="⚙️ Plotinator 100000", font=("Segoe UI", 22, "bold")).pack(side="left")
+        ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
 
-        ttkb.Label(header, text="⚙️ Plotinator 100000",
-                   font=("Segoe UI", 24, "bold"),
-                   bootstyle="light").pack(side="left", padx=10)
-
-        ttkb.Button(header, text="🌓", bootstyle="info", width=3, command=self.toggle_theme).pack(side="right", padx=10)
-
-        # --- Toolbar ---
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
-
-        buttons = [
+        for text, cmd, style in [
             ("📂 Data Folder", self.select_folder, "info-outline"),
+            ("➕ Add Fit", self.add_fit, "success-outline"),
+            ("🗑 Delete Fit", self.delete_fit, "danger-outline"),
             ("💾 Save Config", self.save_config, "secondary-outline"),
             ("🚀 Run Batch", self.run_batch, "success"),
             ("📘 Open Report", self.open_latest_report, "primary-outline"),
-            ("➕ Add Fit", self.add_fit, "success-outline"),
-            ("🗑 Delete Fit", self.delete_fit, "danger-outline")
-        ]
-        for i, (txt, cmd, style) in enumerate(buttons):
-            ttkb.Button(toolbar, text=txt, command=cmd, bootstyle=style).grid(row=0, column=i, padx=6)
+        ]:
+            ttkb.Button(toolbar, text=text, command=cmd, bootstyle=style).pack(side="left", padx=4)
 
-        # --- Table ---
         table_frame = ttkb.Frame(self, padding=10)
         table_frame.pack(fill="both", expand=True)
-
-        self.tree = ttkb.Treeview(
-            table_frame,
-            columns=("Title", "Formula", "Data", "Residuals"),
-            show="headings",
-            height=15,
-            bootstyle="info"
-        )
-        for col, width in [("Title", 180), ("Formula", 260), ("Data", 220), ("Residuals", 80)]:
+        columns = ("Title", "Formula", "Data", "Residuals")
+        self.tree = ttkb.Treeview(table_frame, columns=columns, show="headings", height=12, bootstyle="info")
+        for col, width in zip(columns, (200, 260, 220, 80)):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree.pack(fill="both", expand=True)
 
-        # Zebra stripes
-        self.style.configure("Treeview", rowheight=30)
-        self.tree.tag_configure("odd", background="#222831")
-        self.tree.tag_configure("even", background="#1c1f26")
+        progress_frame = ttkb.Frame(self, padding=(10, 0))
+        progress_frame.pack(fill="x")
+        self.progress = ttkb.Progressbar(progress_frame, mode="determinate", bootstyle="info-striped")
+        self.progress.pack(fill="x")
 
-        # --- Progress + Log Console ---
-        self.progress = ttkb.Progressbar(self, mode="determinate", bootstyle="info-striped")
-        self.progress.pack(fill="x", padx=15, pady=10)
+        log_frame = ttkb.Labelframe(self, text="Batch log", padding=10)
+        log_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        self.log_text = tk.Text(log_frame, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14")
+        self.log_text.pack(fill="both", expand=True)
 
-        self.log_text = tk.Text(self, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14",
-                                font=("Consolas", 10), relief="flat", borderwidth=6,
-                                highlightthickness=1, highlightbackground="#3fa9f5")
-        self.log_text.pack(fill="both", expand=True, padx=15, pady=5)
-
-    def toggle_theme(self):
+    # ------------------------------------------------------------------
+    def toggle_theme(self) -> None:
         current = self.style.theme.name
         new_theme = "flatly" if current == "superhero" else "superhero"
         self.style.theme_use(new_theme)
-        icon = "🌞" if new_theme == "flatly" else "🌙"
-        self.show_toast("🎨 Theme Switched", f"{icon}  Now using {new_theme.title()} mode")
+        self.show_toast(f"Theme switched to {new_theme.title()}")
 
-
-    
-    # --- Config management -------------------------------------------------
-    def load_config(self):
-        # Always start with a sane default
-        self.config_data = {"fits": []}
-
+    # ------------------------------------------------------------------
+    def load_config(self) -> None:
         if not os.path.exists(CONFIG_PATH):
-            # Create a minimal starter config
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.config_data, f, indent=4)
+            self.config_data = {"fits": []}
+            self.save_config()
             self.refresh_table()
             return
 
-        # Read file and normalize schema
         try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as e:
-            self.show_toast("Config error", f"Could not read config.json:\n{e}" , level="error")
+            with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Config error", f"Could not read config.json:\n{exc}")
+            self.config_data = {"fits": []}
             return
 
-        # If it already has 'fits', use it
-        if isinstance(raw, dict) and isinstance(raw.get("fits"), list):
-            self.config_data = {"fits": raw["fits"]}
-from plotinator.config import StyleConfig
-
-
-CONFIG_PATH = "config.json"
-
-class PlotinatorApp(ttkb.Window):
-    def __init__(self):
-        super().__init__(themename="superhero")
-        self.title("Plotinator 100000")
-        self.geometry("1500x900")
-        self.resizable(True, True)
-
-        self.folder = None
-        self.config_data = {}
-
-        self.create_widgets()  # creates self.tree
-        self.tree.bind("<Double-1>", self.on_double_click)  # bind AFTER creation
-        self.load_config()
-
-
-    # --- UI Layout ---------------------------------------------------------
-    def create_widgets(self):
-        # --- Sidebar Accent (optional) ---
-        accent = ttkb.Frame(self, width=8, bootstyle="info")
-        accent.pack(side="left", fill="y")
-
-        # --- Header ---
-        header = ttkb.Frame(self, bootstyle="dark", padding=10)
-        header.pack(fill="x")
-
-        ttkb.Label(header, text="⚙️ Plotinator 100000",
-                   font=("Segoe UI", 24, "bold"),
-                   bootstyle="light").pack(side="left", padx=10)
-
-        ttkb.Button(header, text="🌓", bootstyle="info", width=3, command=self.toggle_theme).pack(side="right", padx=10)
-
-        # --- Toolbar ---
-        toolbar = ttkb.Frame(self, padding=10)
-        toolbar.pack(fill="x")
-
-        buttons = [
-            ("📂 Data Folder", self.select_folder, "info-outline"),
-            ("💾 Save Config", self.save_config, "secondary-outline"),
-            ("🚀 Run Batch", self.run_batch, "success"),
-            ("📘 Open Report", self.open_latest_report, "primary-outline"),
-            ("➕ Add Fit", self.add_fit, "success-outline"),
-            ("🗑 Delete Fit", self.delete_fit, "danger-outline")
-        ]
-        for i, (txt, cmd, style) in enumerate(buttons):
-            ttkb.Button(toolbar, text=txt, command=cmd, bootstyle=style).grid(row=0, column=i, padx=6)
-
-        # --- Table ---
-        table_frame = ttkb.Frame(self, padding=10)
-        table_frame.pack(fill="both", expand=True)
-
-        self.tree = ttkb.Treeview(
-            table_frame,
-            columns=("Title", "Formula", "Data", "Residuals"),
-            show="headings",
-            height=15,
-            bootstyle="info"
-        )
-        for col, width in [("Title", 180), ("Formula", 260), ("Data", 220), ("Residuals", 80)]:
-            self.tree.heading(col, text=col)
-            self.tree.column(col, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # Zebra stripes
-        self.style.configure("Treeview", rowheight=30)
-        self.tree.tag_configure("odd", background="#222831")
-        self.tree.tag_configure("even", background="#1c1f26")
-
-        # --- Progress + Log Console ---
-        self.progress = ttkb.Progressbar(self, mode="determinate", bootstyle="info-striped")
-        self.progress.pack(fill="x", padx=15, pady=10)
-
-        self.log_text = tk.Text(self, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14",
-                                font=("Consolas", 10), relief="flat", borderwidth=6,
-                                highlightthickness=1, highlightbackground="#3fa9f5")
-        self.log_text.pack(fill="both", expand=True, padx=15, pady=5)
-
-    def toggle_theme(self):
-        current = self.style.theme.name
-        new_theme = "flatly" if current == "superhero" else "superhero"
-        self.style.theme_use(new_theme)
-        icon = "🌞" if new_theme == "flatly" else "🌙"
-        self.show_toast("🎨 Theme Switched", f"{icon}  Now using {new_theme.title()} mode")
-
-
-    
-    # --- Config management -------------------------------------------------
-    def load_config(self):
-    # Always start with a sane default
-        self.config_data = {"fits": []}
-
-        if not os.path.exists(CONFIG_PATH):
-            # Create a minimal starter config
-            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump(self.config_data, f, indent=4)
-            self.refresh_table()
-            return
-
-        # Read file and normalize schema
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-        except Exception as e:
-            self.show_toast("Config error", f"Could not read config.json:\n{e}" , level="error")
-            return
-
-        # If it already has 'fits', use it
-        if isinstance(raw, dict) and isinstance(raw.get("fits"), list):
-            self.config_data = {"fits": raw["fits"]}
-            self._ensure_style_defaults()
-
-        # Backwards compatibility: migrate 'plots' -> 'fits'
-        elif isinstance(raw, dict) and isinstance(raw.get("plots"), list):
-            migrated = []
-            for p in raw["plots"]:
-                # Map old keys to new schema gracefully
-                migrated.append({
-                    "title":     p.get("title", "Untitled"),
-                    "formula":   p.get("fit_formula") or p.get("formula", "a*x + b"),
-                    "datafile":  p.get("datafile", ""),
-                    "residuals": bool(p.get("residuals", True)),
-                    "color":     (p.get("style", {}) or {}).get("line_color", "#1f77b4"),
-                })
-            self.config_data = {"fits": migrated}
-
-            # (Optional) write back the migrated file so future loads are clean
-            try:
-                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(self.config_data, f, indent=4)
-            except Exception as e:
-                self.show_toast("Config warning", f"Loaded migrated config but couldn't save it:\n{e}", level="warning")
-
-        else:
-            # Unknown schema; keep default empty fits and warn
-            self.show_toast(
-                "Config warning",
-                "config.json has no 'fits' or 'plots'. Starting with an empty list.",
-                level="warning",
-            )
-
-        for fit in self.config_data.get("fits", []):
-            self._ensure_data_source(fit)
-
+        fits = raw.get("fits") if isinstance(raw, dict) else None
+        if not isinstance(fits, list):
+            messagebox.showwarning("Config warning", "config.json missing 'fits' list; starting empty")
+            fits = []
+        self.config_data = {"fits": fits}
+        for fit in self.config_data["fits"]:
+            self._ensure_fit_defaults(fit)
         self.refresh_table()
 
-    def save_config(self):
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.config_data, f, indent=4)
-        self.show_toast("💾 Configuration saved successfully", level="success")
+    # ------------------------------------------------------------------
+    def save_config(self) -> None:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as fh:
+            json.dump(self.config_data, fh, indent=2)
+        self.show_toast("Configuration saved", level="success")
 
-    def _ensure_data_source(self, fit: dict) -> dict:
+    # ------------------------------------------------------------------
+    def refresh_table(self) -> None:
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        for fit in self.config_data.get("fits", []):
+            datafile = Path(fit.get("data_source", {}).get("path") or fit.get("datafile", "")).name
+            residuals = "✅" if fit.get("residuals", True) else "❌"
+            self.tree.insert(
+                "",
+                "end",
+                values=(fit.get("title", ""), fit.get("formula", ""), datafile, residuals),
+            )
+
+    # ------------------------------------------------------------------
+    def select_folder(self) -> None:
+        folder = filedialog.askdirectory(title="Select data folder")
+        if folder:
+            self.folder = Path(folder)
+            self.show_toast(f"Folder set to {self.folder}")
+
+    # ------------------------------------------------------------------
+    def add_fit(self) -> None:
+        self._open_fit_editor()
+
+    # ------------------------------------------------------------------
+    def delete_fit(self) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            return
+        index = self.tree.index(selection[0])
+        try:
+            self.config_data["fits"].pop(index)
+        except IndexError:
+            return
+        self.refresh_table()
+        self.show_toast("Fit removed", level="warning")
+
+    # ------------------------------------------------------------------
+    def on_double_click(self, _event=None) -> None:
+        selection = self.tree.selection()
+        if not selection:
+            return
+        index = self.tree.index(selection[0])
+        fit = self.config_data["fits"][index]
+        self._open_fit_editor(fit, index)
+
+    # ------------------------------------------------------------------
+    def _open_fit_editor(self, fit: dict | None = None, index: int | None = None) -> None:
+        data = fit.copy() if fit else {"title": "", "formula": "", "datafile": "", "residuals": True, "color": "#1f77b4"}
+        editor = ttkb.Toplevel(self)
+        editor.title("Fit details")
+        editor.geometry("420x320")
+        editor.grab_set()
+
+        entries = {}
+        for i, (label, key) in enumerate([
+            ("Title", "title"),
+            ("Formula", "formula"),
+            ("Data file", "datafile"),
+            ("Color", "color"),
+        ]):
+            ttkb.Label(editor, text=label).grid(row=i, column=0, sticky="w", padx=10, pady=6)
+            entry = ttkb.Entry(editor)
+            entry.grid(row=i, column=1, sticky="ew", padx=10, pady=6)
+            entry.insert(0, data.get(key, ""))
+            entries[key] = entry
+        editor.columnconfigure(1, weight=1)
+
+        residual_var = tk.BooleanVar(value=data.get("residuals", True))
+        ttkb.Checkbutton(editor, text="Generate residual plot", variable=residual_var).grid(
+            row=len(entries), column=0, columnspan=2, sticky="w", padx=10, pady=6
+        )
+
+        def _save() -> None:
+            payload = {
+                "title": entries["title"].get().strip() or "Untitled",
+                "formula": entries["formula"].get().strip() or "a*x + b",
+                "datafile": entries["datafile"].get().strip(),
+                "color": entries["color"].get().strip() or "#1f77b4",
+                "residuals": residual_var.get(),
+            }
+            self._ensure_fit_defaults(payload)
+            if index is None:
+                self.config_data.setdefault("fits", []).append(payload)
+            else:
+                self.config_data["fits"][index] = payload
+            self.refresh_table()
+            editor.destroy()
+
+        buttons = ttkb.Frame(editor)
+        buttons.grid(row=len(entries) + 1, column=0, columnspan=2, pady=10)
+        ttkb.Button(buttons, text="Cancel", command=editor.destroy).pack(side="right", padx=5)
+        ttkb.Button(buttons, text="Save", command=_save, bootstyle="success").pack(side="right", padx=5)
+
+    # ------------------------------------------------------------------
+    def _ensure_fit_defaults(self, fit: dict) -> None:
+        fit.setdefault("title", "Untitled")
+        fit.setdefault("formula", "a*x + b")
+        fit.setdefault("residuals", True)
+        fit.setdefault("color", "#1f77b4")
         data_source = fit.setdefault("data_source", {})
         if "path" not in data_source:
             data_source["path"] = fit.get("datafile", "")
-
         columns = data_source.get("columns")
         if not isinstance(columns, dict):
             columns = {}
-
-        def parse_col(value, default=None):
-            if value in (None, ""):
-                return default
-            try:
-                ivalue = int(value)
-            except (TypeError, ValueError):
-                return default
-            return ivalue if ivalue > 0 else default
-
-        columns = {
-            "x": parse_col(columns.get("x"), 1),
-            "y": parse_col(columns.get("y"), 2),
-            "error": parse_col(columns.get("error")),
-            "weight": parse_col(columns.get("weight")),
+        data_source["columns"] = {
+            "x": int(columns.get("x", 1) or 1),
+            "y": int(columns.get("y", 2) or 2),
+            "error": columns.get("error"),
+            "weight": columns.get("weight"),
         }
-        if columns["x"] is None:
-            columns["x"] = 1
-        if columns["y"] is None:
-            columns["y"] = 2
-        data_source["columns"] = columns
-
-        preprocessing = data_source.get("preprocessing")
-        if isinstance(preprocessing, list):
-            data_source["preprocessing"] = preprocessing
-        else:
-            data_source["preprocessing"] = []
-
-        # maintain compatibility for legacy fields
-        fit["datafile"] = data_source.get("path", "")
-        return data_source
-
-    def refresh_table(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-
-        fits = self.config_data.get("fits", [])
-        for fit in fits:
-            data_source = self._ensure_data_source(fit)
-            title = fit.get("title", "")
-            formula = fit.get("formula", "")
-            datafile = os.path.basename(data_source.get("path", ""))  # cleaner filename only
-            residuals = "✅" if fit.get("residuals", False) else "❌"
-            self.tree.insert("", "end", values=(title, formula, datafile, residuals))
-
-
-    #-------- Utilities ------------------
-
-    def _on_mousewheel(self, event, canvas):
-        """Handle scroll safely across Windows/macOS/Linux."""
-        try:
-            # Windows scroll
-            if event.delta:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            else:
-                # Linux (event.num == 4 or 5)
-                if event.num == 4:
-                    canvas.yview_scroll(-1, "units")
-                elif event.num == 5:
-                    canvas.yview_scroll(1, "units")
-        except tk.TclError:
-            pass  # ignore scrolls after window is closed
-
-    def show_toast(self, message, level="info"):
-        """Display a single floating toast message (auto-destroys after 2s)."""
-        # Reuse or create toast window
-        if hasattr(self, "_toast") and self._toast.winfo_exists():
-            toast = self._toast
-            for widget in toast.winfo_children():
-                widget.destroy()
-        else:
-            toast = tk.Toplevel(self)
-            toast.overrideredirect(True)
-            toast.attributes("-topmost", True)
-            toast.configure(bg="#222")
-            self._toast = toast
-
-        # Pick color based on level
-        colors = {
-            "info": "#2E86C1",
-            "success": "#27AE60",
-            "warning": "#F39C12",
-            "error": "#C0392B"
-        }
-        color = colors.get(level, "#2E86C1")
-
-        label = tk.Label(
-            toast,
-            text=message,
-            bg=color,
-            fg="white",
-            font=("Segoe UI", 10, "bold"),
-            padx=15,
-            pady=8
-        )
-        label.pack(fill="x")
-
-        # Place in bottom-right corner relative to main window
-        self.update_idletasks()
-        x = self.winfo_rootx() + self.winfo_width() - 320
-        y = self.winfo_rooty() + self.winfo_height() - 80
-        toast.geometry(f"300x40+{x}+{y}")
-
-        toast.after(2500, toast.destroy)
-
-
-
-    #sorting by columns
-    def treeview_sort_column(self, col, reverse):
-        data = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
-        data.sort(reverse=reverse)
-        for index, (_, k) in enumerate(data):
-            self.tree.move(k, "", index)
-        self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
-
-
-    #-------- Interactive Stuff ----------
-
-    def on_double_click(self, event):
-        item_id = self.tree.focus()
-        if not item_id:
-            return
-        index = self.tree.index(item_id)
-        self.edit_fit(index)
-
-                # Map old keys to new schema gracefully
-                migrated.append({
-                    "title":     p.get("title", "Untitled"),
-                    "formula":   p.get("fit_formula") or p.get("formula", "a*x + b"),
-                    "datafile":  p.get("datafile", ""),
-                    "residuals": bool(p.get("residuals", True)),
-                    "color":     (p.get("style", {}) or {}).get("line_color", "#1f77b4"),
-                })
-            self.config_data = {"fits": migrated}
-            self._ensure_style_defaults()
-
-            # (Optional) write back the migrated file so future loads are clean
-            try:
-                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                    json.dump(self.config_data, f, indent=4)
-            except Exception as e:
-                self.show_toast("Config warning", f"Loaded migrated config but couldn't save it:\n{e}", level="warning")
-
-        else:
-            # Unknown schema; keep default empty fits and warn
-            self.show_toast("Config warning", "config.json has no 'fits' or 'plots'. Starting with an empty list.",level="warning")
-
-        self.refresh_table()
-
-    def save_config(self):
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(self.config_data, f, indent=4)
-        self.show_toast("💾 Configuration saved successfully", level="success")
-
-    def refresh_table(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-
-        fits = self.config_data.get("fits", [])
-        for fit in fits:
-            title = fit.get("title", "")
-            formula = fit.get("formula", "")
-            datafile = os.path.basename(fit.get("datafile", ""))  # cleaner filename only
-            residuals = "✅" if fit.get("residuals", False) else "❌"
-            self.tree.insert("", "end", values=(title, formula, datafile, residuals))
-
-    def _ensure_style_defaults(self):
-        for fit in self.config_data.get("fits", []):
-            style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
-            fit["style"] = style_cfg.to_dict()
-            fit["color"] = style_cfg.line_color
-
-
-    #-------- Utilities ------------------
-
-    def _on_mousewheel(self, event, canvas):
-        """Handle scroll safely across Windows/macOS/Linux."""
-        try:
-            # Windows scroll
-            if event.delta:
-                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            else:
-                # Linux (event.num == 4 or 5)
-                if event.num == 4:
-                    canvas.yview_scroll(-1, "units")
-                elif event.num == 5:
-                    canvas.yview_scroll(1, "units")
-        except tk.TclError:
-            pass  # ignore scrolls after window is closed
-
-    def show_toast(self, message, level="info"):
-        """Display a single floating toast message (auto-destroys after 2s)."""
-        # Reuse or create toast window
-        if hasattr(self, "_toast") and self._toast.winfo_exists():
-            toast = self._toast
-            for widget in toast.winfo_children():
-                widget.destroy()
-        else:
-            toast = tk.Toplevel(self)
-            toast.overrideredirect(True)
-            toast.attributes("-topmost", True)
-            toast.configure(bg="#222")
-            self._toast = toast
-
-        # Pick color based on level
-        colors = {
-            "info": "#2E86C1",
-            "success": "#27AE60",
-            "warning": "#F39C12",
-            "error": "#C0392B"
-        }
-        color = colors.get(level, "#2E86C1")
-
-        label = tk.Label(
-            toast,
-            text=message,
-            bg=color,
-            fg="white",
-            font=("Segoe UI", 10, "bold"),
-            padx=15,
-            pady=8
-        )
-        label.pack(fill="x")
-
-        # Place in bottom-right corner relative to main window
-        self.update_idletasks()
-        x = self.winfo_rootx() + self.winfo_width() - 320
-        y = self.winfo_rooty() + self.winfo_height() - 80
-        toast.geometry(f"300x40+{x}+{y}")
-
-        toast.after(2500, toast.destroy)
-
-
-
-    #sorting by columns
-    def treeview_sort_column(self, col, reverse):
-        data = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
-        data.sort(reverse=reverse)
-        for index, (_, k) in enumerate(data):
-            self.tree.move(k, "", index)
-        self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
-
-
-    #-------- Interactive Stuff ----------
-
-    def on_double_click(self, event):
-        item_id = self.tree.focus()
-        if not item_id:
-            return
-        index = self.tree.index(item_id)
-        self.edit_fit(index)
-
-    def add_fit(self):
-        new_fit = {
-            "title": "New Fit",
-            "formula": "a*x + b",
-            "datafile": "",
-            "residuals": True,
-            "color": "#1f77b4",
-            "parameters": {"a": 1.0, "b": 1.0},
-            "style": StyleConfig().to_dict(),
-        }
-        self.config_data.setdefault("fits", []).append(new_fit)
-        index = len(self.config_data["fits"]) - 1
-        self.save_config()
-        self.refresh_table()
-        self.edit_fit(index)
-        self.show_toast("➕ New fit added",level="info")
-
-    def delete_fit(self):
-        """Delete the currently selected fit from the list."""
-        item_id = self.tree.focus()
-        if not item_id:
-            self.show_toast("⚠️ No fit selected" , level="warning")
-            return
-
-        index = self.tree.index(item_id)
-        fit = self.config_data["fits"][index]
-
-        # direct deletion, no popup confirm
-        del self.config_data["fits"][index]
-        self.save_config()
-        self.refresh_table()
-        self.show_toast(f"🗑 Deleted '{fit.get('title', 'Unnamed Fit')}'", level="info")
-
-
-    def edit_fit(self, index):
-        """Open the edit window for a specific fit index."""
-        fit = self.config_data["fits"][index]
-        style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
-        edit_win = tk.Toplevel(self)
-        edit_win.title(f"Edit Fit #{index + 1}")
-        edit_win.geometry("600x600")
-        edit_win.resizable(False, False)
-
-        # --- Scrollable container setup ---
-        canvas = tk.Canvas(edit_win)
-        scrollbar = tk.Scrollbar(edit_win, orient="vertical", command=canvas.yview)
-        scrollable_frame = tk.Frame(canvas)
-
-        # Bind size of inner frame to scroll region
-        scrollable_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        # Place the inner frame inside the canvas
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw", width=400)
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        # Layout
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-
-        # Bind scroll events (Windows / Mac)
-        canvas.bind_all("<MouseWheel>", lambda e: self._on_mousewheel(e, canvas))  # Windows
-        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))  # Linux scroll up
-        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))   # Linux scroll down
-
-
-        # --- Title
-        tk.Label(scrollable_frame, text="Title:").pack(anchor="w", padx=10, pady=2)
-        title_var = tk.StringVar(value=fit.get("title", ""))
-        tk.Entry(scrollable_frame, textvariable=title_var).pack(fill="x", padx=10)
-
-        # --- Formula
-        tk.Label(scrollable_frame, text="Formula:").pack(anchor="w", padx=10, pady=2)
-        formula_var = tk.StringVar(value=fit.get("formula", "a*x+b"))
-        tk.Entry(scrollable_frame, textvariable=formula_var).pack(fill="x", padx=10)
-
-        # --- Data file
-        tk.Label(scrollable_frame, text="Data file:").pack(anchor="w", padx=10, pady=2)
-        data_var = tk.StringVar(value=fit.get("datafile", ""))
-
-        def browse_file():
-            file_path = filedialog.askopenfilename(
-                title="Select data file",
-                filetypes=[("Data files", "*.dat *.txt *.csv")]
-            )
-            if not file_path:
-                return
-
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            data_dir = os.path.join(base_dir, "data")
-            os.makedirs(data_dir, exist_ok=True)
-
-            dest_path = os.path.join(data_dir, os.path.basename(file_path))
-
-            # If file is already inside data/, skip the copy
-            try:
-                if os.path.samefile(file_path, dest_path):
-                    rel_path = f"data/{os.path.basename(dest_path)}"
-                    data_var.set(rel_path)
-                    fit["datafile"] = rel_path
-                    self.show_toast(f"📄 Using existing file: {os.path.basename(dest_path)}", level="info")
-                    return
-
-                shutil.copy(file_path, dest_path)
-                rel_path = f"data/{os.path.basename(dest_path)}"
-                data_var.set(rel_path)
-                fit["datafile"] = rel_path
-                self.show_toast(f"📂 Imported {os.path.basename(dest_path)}", level="success")
-
-            except Exception as e:
-                self.show_toast(f"❌ Copy failed: {e}", level="error")
-
-
-
-
-        frame = tk.Frame(scrollable_frame)
-        frame.pack(fill="x", padx=10)
-        tk.Entry(frame, textvariable=data_var).pack(side="left", fill="x", expand=True)
-        tk.Button(frame, text="📂", command=browse_file).pack(side="left", padx=5)
-
-        # --- Residuals
-        residuals_var = tk.BooleanVar(value=fit.get("residuals", True))
-        tk.Checkbutton(scrollable_frame, text="Generate residuals plot", variable=residuals_var).pack(anchor="w", padx=10, pady=5)
-
-        # --- Axes options
-        x_label_var = tk.StringVar(value=style_cfg.x_label)
-        x_unit_var = tk.StringVar(value=style_cfg.x_unit)
-        x_scale_var = tk.StringVar(value=style_cfg.x_scale)
-        x_tick_format_var = tk.StringVar(value=style_cfg.x_tick_format)
-        y_label_var = tk.StringVar(value=style_cfg.y_label)
-        y_unit_var = tk.StringVar(value=style_cfg.y_unit)
-        y_scale_var = tk.StringVar(value=style_cfg.y_scale)
-        y_tick_format_var = tk.StringVar(value=style_cfg.y_tick_format)
-
-        axes_frame = tk.LabelFrame(scrollable_frame, text="Axes")
-        axes_frame.pack(fill="x", padx=10, pady=8)
-        for col in (1, 3):
-            axes_frame.columnconfigure(col, weight=1)
-
-        tk.Label(axes_frame, text="X label").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=x_label_var).grid(row=0, column=1, sticky="ew", padx=5, pady=2)
-        tk.Label(axes_frame, text="Unit").grid(row=0, column=2, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=x_unit_var).grid(row=0, column=3, sticky="ew", padx=5, pady=2)
-
-        tk.Label(axes_frame, text="X scale").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        ttk.Combobox(axes_frame, textvariable=x_scale_var, values=list(StyleConfig.VALID_SCALES), state="readonly").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
-        tk.Label(axes_frame, text="Tick format").grid(row=1, column=2, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=x_tick_format_var).grid(row=1, column=3, sticky="ew", padx=5, pady=2)
-
-        tk.Label(axes_frame, text="Y label").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=y_label_var).grid(row=2, column=1, sticky="ew", padx=5, pady=2)
-        tk.Label(axes_frame, text="Unit").grid(row=2, column=2, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=y_unit_var).grid(row=2, column=3, sticky="ew", padx=5, pady=2)
-
-        tk.Label(axes_frame, text="Y scale").grid(row=3, column=0, sticky="w", padx=5, pady=2)
-        ttk.Combobox(axes_frame, textvariable=y_scale_var, values=list(StyleConfig.VALID_SCALES), state="readonly").grid(row=3, column=1, sticky="ew", padx=5, pady=2)
-        tk.Label(axes_frame, text="Tick format").grid(row=3, column=2, sticky="w", padx=5, pady=2)
-        tk.Entry(axes_frame, textvariable=y_tick_format_var).grid(row=3, column=3, sticky="ew", padx=5, pady=2)
-
-        # --- Grid & legend
-        grid_var = tk.BooleanVar(value=style_cfg.grid)
-        grid_layer_var = tk.StringVar(value=style_cfg.grid_layer)
-        legend_visible_var = tk.BooleanVar(value=style_cfg.legend_visible)
-        legend_position_var = tk.StringVar(value=style_cfg.legend_position)
-
-        grid_frame = tk.LabelFrame(scrollable_frame, text="Grid & legend")
-        grid_frame.pack(fill="x", padx=10, pady=8)
-        grid_frame.columnconfigure(1, weight=1)
-
-        tk.Checkbutton(grid_frame, text="Show grid", variable=grid_var).grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        ttk.Combobox(grid_frame, textvariable=grid_layer_var, values=list(StyleConfig.VALID_GRID_LAYERS), state="readonly").grid(row=0, column=1, sticky="ew", padx=5, pady=2)
-
-        tk.Checkbutton(grid_frame, text="Show legend", variable=legend_visible_var).grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        ttk.Combobox(grid_frame, textvariable=legend_position_var, values=list(StyleConfig.VALID_LEGEND_POSITIONS.keys()), state="readonly").grid(row=1, column=1, sticky="ew", padx=5, pady=2)
-
-        # --- Fonts
-        font_family_var = tk.StringVar(value=style_cfg.font_family)
-        font_size_var = tk.IntVar(value=style_cfg.font_size)
-        title_font_size_var = tk.IntVar(value=style_cfg.title_font_size)
-        axis_font_size_var = tk.IntVar(value=style_cfg.axis_label_font_size)
-        tick_font_size_var = tk.IntVar(value=style_cfg.tick_font_size)
-
-        fonts_frame = tk.LabelFrame(scrollable_frame, text="Fonts")
-        fonts_frame.pack(fill="x", padx=10, pady=8)
-        fonts_frame.columnconfigure(1, weight=1)
-
-        tk.Label(fonts_frame, text="Family").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-        tk.Entry(fonts_frame, textvariable=font_family_var).grid(row=0, column=1, sticky="ew", padx=5, pady=2)
-
-        tk.Label(fonts_frame, text="Base size").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=font_size_var, width=6).grid(row=1, column=1, sticky="w", padx=5, pady=2)
-        tk.Label(fonts_frame, text="Title size").grid(row=1, column=2, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(fonts_frame, from_=8, to=64, textvariable=title_font_size_var, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=2)
-
-        tk.Label(fonts_frame, text="Axis labels").grid(row=2, column=0, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=axis_font_size_var, width=6).grid(row=2, column=1, sticky="w", padx=5, pady=2)
-        tk.Label(fonts_frame, text="Tick labels").grid(row=2, column=2, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(fonts_frame, from_=6, to=48, textvariable=tick_font_size_var, width=6).grid(row=2, column=3, sticky="w", padx=5, pady=2)
-
-        # --- Line & point appearance
-        color_var = tk.StringVar(value=style_cfg.line_color)
-        line_width_var = tk.DoubleVar(value=style_cfg.line_width)
-        point_type_var = tk.IntVar(value=style_cfg.point_type)
-
-        appearance_frame = tk.LabelFrame(scrollable_frame, text="Line & points")
-        appearance_frame.pack(fill="x", padx=10, pady=8)
-        appearance_frame.columnconfigure(1, weight=1)
-
-        tk.Label(appearance_frame, text="Line color").grid(row=0, column=0, sticky="w", padx=5, pady=2)
-
-        def choose_color():
-            color = colorchooser.askcolor(color_var.get())[1]
-            if color:
-                color_var.set(color)
-
-        color_entry = tk.Entry(appearance_frame, textvariable=color_var)
-        color_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=2)
-        tk.Button(appearance_frame, text="🎨", command=choose_color).grid(row=0, column=2, padx=5, pady=2)
-
-        tk.Label(appearance_frame, text="Line width").grid(row=1, column=0, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(appearance_frame, from_=0.5, to=10.0, increment=0.5, textvariable=line_width_var, width=6).grid(row=1, column=1, sticky="w", padx=5, pady=2)
-
-        tk.Label(appearance_frame, text="Point type").grid(row=1, column=2, sticky="w", padx=5, pady=2)
-        ttk.Spinbox(appearance_frame, from_=0, to=15, textvariable=point_type_var, width=6).grid(row=1, column=3, sticky="w", padx=5, pady=2)
-
-        # --- Parameters ---
-        tk.Label(scrollable_frame, text="Parameters:").pack(anchor="w", padx=10, pady=(10, 0))
-        params_frame = tk.Frame(scrollable_frame)
-        params_frame.pack(fill="x", padx=10)
-
-        param_vars = {}
-
-        def refresh_parameters():
-            """Rebuild parameter entries based on formula contents."""
-            for widget in params_frame.winfo_children():
-                widget.destroy()
-
-            param_names = self.extract_parameters_from_formula(formula_var.get())
-            existing_params = fit.get("parameters", {})
-
-            if not param_names:
-                tk.Label(params_frame, text="(No parameters detected)", fg="gray").pack(anchor="w")
-                return
-
-            for name in param_names:
-                row = tk.Frame(params_frame)
-                row.pack(fill="x", pady=2)
-                tk.Label(row, text=f"{name}:").pack(side="left")
-                val = existing_params.get(name, 1.0)
-                var = tk.DoubleVar(value=val)
-                tk.Entry(row, textvariable=var, width=10).pack(side="left", padx=5)
-                param_vars[name] = var
-
-            # Smooth feedback toast
-            self.show_toast("🔄 Parameters updated from formula" , level="info")
-
-        # Initialize once
-        refresh_parameters()
-
-        # Automatically refresh when formula changes
-        formula_var.trace_add("write", lambda *_: refresh_parameters())
-
-
-        # --- Save button
-        tk.Label(scrollable_frame, text=" ").pack()  # spacer before Save button
-        def save_and_close():
-            fit["title"] = title_var.get()
-            fit["formula"] = formula_var.get()
-            fit["datafile"] = data_var.get()
-            fit["residuals"] = residuals_var.get()
-            fit["parameters"] = {k: v.get() for k, v in param_vars.items()}
-
-            style_payload = {
-                "x_label": x_label_var.get().strip(),
-                "x_unit": x_unit_var.get().strip(),
-                "x_scale": x_scale_var.get(),
-                "x_tick_format": x_tick_format_var.get().strip(),
-                "y_label": y_label_var.get().strip(),
-                "y_unit": y_unit_var.get().strip(),
-                "y_scale": y_scale_var.get(),
-                "y_tick_format": y_tick_format_var.get().strip(),
-                "grid": grid_var.get(),
-                "grid_layer": grid_layer_var.get(),
-                "legend_visible": legend_visible_var.get(),
-                "legend_position": legend_position_var.get(),
-                "font_family": font_family_var.get().strip() or style_cfg.font_family,
-                "font_size": font_size_var.get(),
-                "title_font_size": title_font_size_var.get(),
-                "axis_label_font_size": axis_font_size_var.get(),
-                "tick_font_size": tick_font_size_var.get(),
-                "line_color": color_var.get().strip() or style_cfg.line_color,
-                "line_width": line_width_var.get(),
-                "point_type": point_type_var.get(),
-            }
-
-            new_style = StyleConfig.from_dict(style_payload)
-            fit["style"] = new_style.to_dict()
-            fit["color"] = new_style.line_color
-
-            self.save_config()
-            self.refresh_table()
-            self.show_toast(f"Saved '{fit['title']}'", level="info")
-            edit_win.destroy()
-
-
-        tk.Button(scrollable_frame, text="💾 Save", command=save_and_close, bg="#4CAF50", fg="white").pack(pady=15)
-
-        edit_win.transient(self)
-        canvas.yview_moveto(0)
-        edit_win.grab_set()
-        edit_win.wait_window()
-
-    # --- Folder and execution ---------------------------------------------
-    def select_folder(self):
-        folder = filedialog.askdirectory(title="Select Data Folder")
-        if folder:
-            self.folder = folder
-            self.show_toast(f"📂 Selected: {os.path.basename(folder)}", level="success")
-
-
-    def run_batch(self):
-        import subprocess, sys, threading, os
-
-        config_path = os.path.join(os.getcwd(), "config.json")
-        backend_script = os.path.join(os.getcwd(), "plot_manager.py")
-
-        if not os.path.exists(backend_script):
-            self.show_toast("❌ Backend script not found (plot_manager.py)", level="error")
+        data_source.setdefault("preprocessing", [])
+
+    # ------------------------------------------------------------------
+    def run_batch(self) -> None:
+        if self.runner_thread and self.runner_thread.is_alive():
+            messagebox.showinfo("Batch running", "A batch is already running")
             return
 
         self.save_config()
-        self.show_toast("🚀 Starting batch generation...", level="info")
+        self.progress.configure(value=0)
         self.log_text.delete("1.0", tk.END)
-        self.progress.config(mode="indeterminate")
-        self.progress.start(10)
+        self._stop_log.clear()
 
-        def run_backend():
+        def _runner() -> None:
+            cmd = [sys.executable, "plot_manager.py", CONFIG_PATH]
             try:
                 process = subprocess.Popen(
-                    [sys.executable, backend_script, config_path],
+                    cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True
+                    text=True,
+                    bufsize=1,
                 )
-                for line in iter(process.stdout.readline, ""):
-                    self.log_text.insert("end", line)
-                    self.log_text.see("end")
-                    self.update_idletasks()  # keeps UI responsive
-                process.wait()
-
-                if process.returncode == 0:
-                    self.show_toast("✅ Batch completed successfully", level="success")
-                else:
-                    self.show_toast("❌ Batch failed (see log)", level="error")
-
-            except Exception as e:
-                self.log_text.insert("end", f"\n⚠️ Exception: {e}\n")
-                self.show_toast("⚠️ Backend error (see log)", level="error")
-
-            finally:
-                self.progress.stop()
-                self.progress.config(mode="determinate", value=0)
-
-        threading.Thread(target=run_backend, daemon=True).start()
-
-
-
-    def open_latest_report(self):
-        outputs_path = "outputs"
-        if not os.path.exists(outputs_path):
-            self.show_toast("Warning", "No output folder found.", level="error")
-            return
-        latest = sorted(os.listdir(outputs_path))[-1]
-        report = os.path.join(outputs_path, latest, "report.pdf")
-        if os.path.exists(report):
-            try:
-                system = platform.system()
-                if system == "Windows":
-                    os.startfile(report)
-                elif system == "Darwin":
-                    subprocess.run(["open", report], check=False)
-                else:
-                    opener = shutil.which("xdg-open")
-                    if opener:
-                        subprocess.run([opener, report], check=False)
-                    else:
-                        webbrowser.open(f"file://{os.path.abspath(report)}")
-            except Exception as exc:
-                self.show_toast("Warning", f"Could not open report automatically: {exc}", level="warning")
+            except OSError as exc:
+                self._append_log(f"Failed to start plot_manager.py: {exc}\n")
                 return
-        else:
-            self.show_toast("Warning", "No report.pdf found in latest output.", level="warning")
 
-    # --- Helpers -----------------------------------------------------------
-    def log(self, msg):
-        self.log_text.insert("end", msg + "\n")
-        self.log_text.see("end")
+            for line in process.stdout:
+                if self._stop_log.is_set():
+                    break
+                self._append_log(line)
+            process.wait()
+            self.progress.configure(value=100)
+            self._append_log("\n[DONE] Batch finished.\n")
 
-    def extract_parameters_from_formula(self, formula: str):
-        """
-        Extracts parameter names from the formula, supporting Latin and Greek-style names.
-        Skips 'x', numbers, and common math functions.
-        """
-        blacklist = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
+        self.runner_thread = threading.Thread(target=_runner, daemon=True)
+        self.runner_thread.start()
 
-        # Allow Latin and Greek letters (α, β, γ, …) and underscores
-        tokens = re.findall(r"[A-Za-zα-ωΑ-Ω_][A-Za-z0-9α-ωΑ-Ω_]*", formula)
-        params = sorted(set(t for t in tokens if t not in blacklist))
-        return params
+    # ------------------------------------------------------------------
+    def _append_log(self, text: str) -> None:
+        def _write() -> None:
+            self.log_text.insert(tk.END, text)
+            self.log_text.see(tk.END)
+
+        self.after(0, _write)
+
+    # ------------------------------------------------------------------
+    def open_latest_report(self) -> None:
+        outputs = Path("outputs")
+        if not outputs.exists():
+            messagebox.showinfo("No outputs", "No outputs folder found yet.")
+            return
+        latest = max(outputs.glob("*/fit_results.json"), default=None, key=lambda p: p.stat().st_mtime)
+        if not latest:
+            messagebox.showinfo("No report", "Generate a batch before opening a report.")
+            return
+        webbrowser = __import__("webbrowser")
+        webbrowser.open(latest.parent.as_uri())
+
+    # ------------------------------------------------------------------
+    def show_toast(self, message: str, level: str = "info") -> None:
+        colors = {
+            "info": "#2E86C1",
+            "success": "#27AE60",
+            "warning": "#F39C12",
+            "error": "#C0392B",
+        }
+        toast = tk.Toplevel(self)
+        toast.overrideredirect(True)
+        toast.configure(bg=colors.get(level, "#2E86C1"))
+        ttkb.Label(toast, text=message, bootstyle="inverse", padding=10).pack()
+        self.update_idletasks()
+        x = self.winfo_rootx() + self.winfo_width() - 260
+        y = self.winfo_rooty() + self.winfo_height() - 100
+        toast.geometry(f"240x60+{x}+{y}")
+        toast.after(2500, toast.destroy)
 
 
 if __name__ == "__main__":
