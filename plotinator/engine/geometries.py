@@ -347,9 +347,9 @@ class HistogramGeometry(GeometryDefinition):
 
         if density:
             base.append("norm = STATS_records * bin_width")
-            using_expr = "(bin($%d, bin_width)):(1.0/norm)" % col_index
+            using_expr = "(bin($%d)):(1.0/norm)" % col_index
         else:
-            using_expr = "(bin($%d, bin_width)):(1.0)" % col_index
+            using_expr = "(bin($%d)):(1.0)" % col_index
 
         base.append(
             (
