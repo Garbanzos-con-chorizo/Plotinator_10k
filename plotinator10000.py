@@ -6,6 +6,117 @@ import shutil
 import re
 from ttkbootstrap.constants import *
 
+
+CONFIG_PATH = "config.json"
+
+class PlotinatorApp(ttkb.Window):
+    def __init__(self):
+        super().__init__(themename="superhero")
+        self.title("Plotinator 100000")
+        self.geometry("1500x900")
+        self.resizable(True, True)
+
+        self.folder = None
+        self.config_data = {}
+
+        self.create_widgets()  # creates self.tree
+        self.tree.bind("<Double-1>", self.on_double_click)  # bind AFTER creation
+        self.load_config()
+
+
+    # --- UI Layout ---------------------------------------------------------
+    def create_widgets(self):
+        # --- Sidebar Accent (optional) ---
+        accent = ttkb.Frame(self, width=8, bootstyle="info")
+        accent.pack(side="left", fill="y")
+
+        # --- Header ---
+        header = ttkb.Frame(self, bootstyle="dark", padding=10)
+        header.pack(fill="x")
+
+        ttkb.Label(header, text="⚙️ Plotinator 100000",
+                   font=("Segoe UI", 24, "bold"),
+                   bootstyle="light").pack(side="left", padx=10)
+
+        ttkb.Button(header, text="🌓", bootstyle="info", width=3, command=self.toggle_theme).pack(side="right", padx=10)
+
+        # --- Toolbar ---
+        toolbar = ttkb.Frame(self, padding=10)
+        toolbar.pack(fill="x")
+
+        buttons = [
+            ("📂 Data Folder", self.select_folder, "info-outline"),
+            ("💾 Save Config", self.save_config, "secondary-outline"),
+            ("🚀 Run Batch", self.run_batch, "success"),
+            ("📘 Open Report", self.open_latest_report, "primary-outline"),
+            ("➕ Add Fit", self.add_fit, "success-outline"),
+            ("🗑 Delete Fit", self.delete_fit, "danger-outline")
+        ]
+        for i, (txt, cmd, style) in enumerate(buttons):
+            ttkb.Button(toolbar, text=txt, command=cmd, bootstyle=style).grid(row=0, column=i, padx=6)
+
+        # --- Table ---
+        table_frame = ttkb.Frame(self, padding=10)
+        table_frame.pack(fill="both", expand=True)
+
+        self.tree = ttkb.Treeview(
+            table_frame,
+            columns=("Title", "Formula", "Data", "Residuals"),
+            show="headings",
+            height=15,
+            bootstyle="info"
+        )
+        for col, width in [("Title", 180), ("Formula", 260), ("Data", 220), ("Residuals", 80)]:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=width, anchor="w")
+        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Zebra stripes
+        self.style.configure("Treeview", rowheight=30)
+        self.tree.tag_configure("odd", background="#222831")
+        self.tree.tag_configure("even", background="#1c1f26")
+
+        # --- Progress + Log Console ---
+        self.progress = ttkb.Progressbar(self, mode="determinate", bootstyle="info-striped")
+        self.progress.pack(fill="x", padx=15, pady=10)
+
+        self.log_text = tk.Text(self, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14",
+                                font=("Consolas", 10), relief="flat", borderwidth=6,
+                                highlightthickness=1, highlightbackground="#3fa9f5")
+        self.log_text.pack(fill="both", expand=True, padx=15, pady=5)
+
+    def toggle_theme(self):
+        current = self.style.theme.name
+        new_theme = "flatly" if current == "superhero" else "superhero"
+        self.style.theme_use(new_theme)
+        icon = "🌞" if new_theme == "flatly" else "🌙"
+        self.show_toast("🎨 Theme Switched", f"{icon}  Now using {new_theme.title()} mode")
+
+
+    
+    # --- Config management -------------------------------------------------
+    def load_config(self):
+        # Always start with a sane default
+        self.config_data = {"fits": []}
+
+        if not os.path.exists(CONFIG_PATH):
+            # Create a minimal starter config
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(self.config_data, f, indent=4)
+            self.refresh_table()
+            return
+
+        # Read file and normalize schema
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as e:
+            self.show_toast("Config error", f"Could not read config.json:\n{e}" , level="error")
+            return
+
+        # If it already has 'fits', use it
+        if isinstance(raw, dict) and isinstance(raw.get("fits"), list):
+            self.config_data = {"fits": raw["fits"]}
 from plotinator.config import StyleConfig
 
 
@@ -125,6 +236,174 @@ class PlotinatorApp(ttkb.Window):
         elif isinstance(raw, dict) and isinstance(raw.get("plots"), list):
             migrated = []
             for p in raw["plots"]:
+                # Map old keys to new schema gracefully
+                migrated.append({
+                    "title":     p.get("title", "Untitled"),
+                    "formula":   p.get("fit_formula") or p.get("formula", "a*x + b"),
+                    "datafile":  p.get("datafile", ""),
+                    "residuals": bool(p.get("residuals", True)),
+                    "color":     (p.get("style", {}) or {}).get("line_color", "#1f77b4"),
+                })
+            self.config_data = {"fits": migrated}
+
+            # (Optional) write back the migrated file so future loads are clean
+            try:
+                with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                    json.dump(self.config_data, f, indent=4)
+            except Exception as e:
+                self.show_toast("Config warning", f"Loaded migrated config but couldn't save it:\n{e}", level="warning")
+
+        else:
+            # Unknown schema; keep default empty fits and warn
+            self.show_toast(
+                "Config warning",
+                "config.json has no 'fits' or 'plots'. Starting with an empty list.",
+                level="warning",
+            )
+
+        for fit in self.config_data.get("fits", []):
+            self._ensure_data_source(fit)
+
+        self.refresh_table()
+
+    def save_config(self):
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(self.config_data, f, indent=4)
+        self.show_toast("💾 Configuration saved successfully", level="success")
+
+    def _ensure_data_source(self, fit: dict) -> dict:
+        data_source = fit.setdefault("data_source", {})
+        if "path" not in data_source:
+            data_source["path"] = fit.get("datafile", "")
+
+        columns = data_source.get("columns")
+        if not isinstance(columns, dict):
+            columns = {}
+
+        def parse_col(value, default=None):
+            if value in (None, ""):
+                return default
+            try:
+                ivalue = int(value)
+            except (TypeError, ValueError):
+                return default
+            return ivalue if ivalue > 0 else default
+
+        columns = {
+            "x": parse_col(columns.get("x"), 1),
+            "y": parse_col(columns.get("y"), 2),
+            "error": parse_col(columns.get("error")),
+            "weight": parse_col(columns.get("weight")),
+        }
+        if columns["x"] is None:
+            columns["x"] = 1
+        if columns["y"] is None:
+            columns["y"] = 2
+        data_source["columns"] = columns
+
+        preprocessing = data_source.get("preprocessing")
+        if isinstance(preprocessing, list):
+            data_source["preprocessing"] = preprocessing
+        else:
+            data_source["preprocessing"] = []
+
+        # maintain compatibility for legacy fields
+        fit["datafile"] = data_source.get("path", "")
+        return data_source
+
+    def refresh_table(self):
+        for i in self.tree.get_children():
+            self.tree.delete(i)
+
+        fits = self.config_data.get("fits", [])
+        for fit in fits:
+            data_source = self._ensure_data_source(fit)
+            title = fit.get("title", "")
+            formula = fit.get("formula", "")
+            datafile = os.path.basename(data_source.get("path", ""))  # cleaner filename only
+            residuals = "✅" if fit.get("residuals", False) else "❌"
+            self.tree.insert("", "end", values=(title, formula, datafile, residuals))
+
+
+    #-------- Utilities ------------------
+
+    def _on_mousewheel(self, event, canvas):
+        """Handle scroll safely across Windows/macOS/Linux."""
+        try:
+            # Windows scroll
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            else:
+                # Linux (event.num == 4 or 5)
+                if event.num == 4:
+                    canvas.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    canvas.yview_scroll(1, "units")
+        except tk.TclError:
+            pass  # ignore scrolls after window is closed
+
+    def show_toast(self, message, level="info"):
+        """Display a single floating toast message (auto-destroys after 2s)."""
+        # Reuse or create toast window
+        if hasattr(self, "_toast") and self._toast.winfo_exists():
+            toast = self._toast
+            for widget in toast.winfo_children():
+                widget.destroy()
+        else:
+            toast = tk.Toplevel(self)
+            toast.overrideredirect(True)
+            toast.attributes("-topmost", True)
+            toast.configure(bg="#222")
+            self._toast = toast
+
+        # Pick color based on level
+        colors = {
+            "info": "#2E86C1",
+            "success": "#27AE60",
+            "warning": "#F39C12",
+            "error": "#C0392B"
+        }
+        color = colors.get(level, "#2E86C1")
+
+        label = tk.Label(
+            toast,
+            text=message,
+            bg=color,
+            fg="white",
+            font=("Segoe UI", 10, "bold"),
+            padx=15,
+            pady=8
+        )
+        label.pack(fill="x")
+
+        # Place in bottom-right corner relative to main window
+        self.update_idletasks()
+        x = self.winfo_rootx() + self.winfo_width() - 320
+        y = self.winfo_rooty() + self.winfo_height() - 80
+        toast.geometry(f"300x40+{x}+{y}")
+
+        toast.after(2500, toast.destroy)
+
+
+
+    #sorting by columns
+    def treeview_sort_column(self, col, reverse):
+        data = [(self.tree.set(k, col), k) for k in self.tree.get_children("")]
+        data.sort(reverse=reverse)
+        for index, (_, k) in enumerate(data):
+            self.tree.move(k, "", index)
+        self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+
+
+    #-------- Interactive Stuff ----------
+
+    def on_double_click(self, event):
+        item_id = self.tree.focus()
+        if not item_id:
+            return
+        index = self.tree.index(item_id)
+        self.edit_fit(index)
+
                 # Map old keys to new schema gracefully
                 migrated.append({
                     "title":     p.get("title", "Untitled"),
