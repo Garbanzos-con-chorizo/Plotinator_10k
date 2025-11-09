@@ -117,56 +117,50 @@ def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> d
     return guesses
 
 
-def _gnuplot_path(path: str) -> str:
-    """Return a filesystem path formatted for gnuplot consumption."""
-    if not path:
-        return path
-    return os.path.abspath(path).replace("\\", "/")
+def _gnuplot_path(path: str | os.PathLike | None) -> str:
+    """Return a gnuplot-safe path (forward slashes)."""
+    if path is None:
+        return ""
+    return os.fspath(path).replace("\\", "/")
+
+
+def _slugify(value: str, default: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value or "").strip("_")
+    return cleaned.lower() or default
 
 
 def generate_gnuplot_code(
     cfg: dict, out_plot: str | None, out_residuals: str | None = None
 ) -> str:
     style = cfg.get("style", {})
-    formula  = cfg["fit_formula"]
-    params   = cfg["fit_params"]
+    formula = cfg["fit_formula"]
+    params = cfg["fit_params"]
     params_csv = ",".join(params)
     datasets = cfg.get("datasets", [])
     if not datasets:
         raise ValueError("At least one dataset must be defined for each fit")
 
-    dataset_index = 0
-    fit_dataset_id = cfg.get("fit_dataset")
-    if fit_dataset_id:
-        for idx, ds in enumerate(datasets):
-            if ds.get("id") == fit_dataset_id:
-                dataset_index = idx
-                break
-    primary_dataset = datasets[dataset_index]
-    residual_dataset = primary_dataset
-    residual_dataset_id = cfg.get("residual_dataset")
-    if residual_dataset_id:
-        for ds in datasets:
-            if ds.get("id") == residual_dataset_id:
-                residual_dataset = ds
-                break
-    datafile = _gnuplot_path(primary_dataset["datafile"])
+    dataset_lookup = {ds.get("id"): ds for ds in datasets}
+    primary_dataset = dataset_lookup.get(cfg.get("fit_dataset")) or datasets[0]
+    residual_dataset = dataset_lookup.get(cfg.get("residual_dataset")) or primary_dataset
+
+    primary_path = primary_dataset["datafile"]
+    primary_datafile = _gnuplot_path(primary_path)
 
     # Compute smart initial guesses
-    guesses = estimate_initial_params(datafile, formula, params)
+    guesses = estimate_initial_params(primary_path, formula, params)
     overrides = cfg.get("initial_params") or {}
     for key, value in overrides.items():
         if key in guesses:
             guesses[key] = value
     init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
     prints = "\n".join([
-       f'if (exists("{p}_err")) {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
-       f'}} else {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
-       for p in params
+        f'if (exists("{p}_err")) {{ '
+        f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
+        f'}} else {{ '
+        f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
+        for p in params
     ])
-
 
     layout = cfg.get("layout", {})
     rows = max(1, int(layout.get("rows", 1)))
@@ -174,20 +168,24 @@ def generate_gnuplot_code(
     share_x = bool(layout.get("share_x", False))
     share_y = bool(layout.get("share_y", False))
     show_legend = bool(layout.get("show_legend", True))
-    panes = layout.get("panes", [])
+    panes = layout.get("panes") or []
     if not panes:
-        panes = [{"id": "main", "title": cfg["title"], "legend": True, "residuals": False, "show_fit": True}]
+        panes = [
+            {
+                "id": "main",
+                "title": cfg["title"],
+                "legend": True,
+                "residuals": False,
+                "show_fit": True,
+            }
+        ]
 
     pane_count = len(panes)
     max_slots = rows * cols
     if pane_count > max_slots:
         rows = math.ceil(pane_count / cols)
         max_slots = rows * cols
-    if pane_count < max_slots:
-        # Keep rows/cols but gnuplot will simply leave blanks; no action needed
-        pass
 
-    fit_style = style
     width = 800 * cols
     height = 600 * rows
 
@@ -198,7 +196,7 @@ set fit errorvariables
 {init_lines}
 
 f(x) = {formula}
-fit f(x) "{datafile}" via {params_csv}
+fit f(x) "{primary_datafile}" via {params_csv}
 
 {prints}
 
@@ -209,15 +207,17 @@ fit f(x) "{datafile}" via {params_csv}
         code += f"set output \"{plot_output_path}\"\n"
         code += f"set multiplot layout {rows},{cols} title \"{cfg['title']}\"\n"
 
+        dataset_by_pane = {}
+        for ds in datasets:
+            pane_id = ds.get("pane")
+            dataset_by_pane.setdefault(pane_id, []).append(ds)
+
         for idx, pane in enumerate(panes):
             pane_title = pane.get("title") or cfg["title"]
             legend_on = show_legend and pane.get("legend", True)
             show_fit_line = pane.get("show_fit", not pane.get("residuals", False))
             is_residual = pane.get("residuals", False)
-            xlabel = pane.get("xlabel") or ("X" if not (share_x and idx < (pane_count - cols)) else "")
-            ylabel = pane.get("ylabel") or ("Y" if not (share_y and (idx % cols) != 0) else "")
 
-            code += f"set title \"{pane_title}\"\n"
             if legend_on:
                 code += "set key inside\n"
             else:
@@ -226,42 +226,51 @@ fit f(x) "{datafile}" via {params_csv}
             if share_x and idx < (pane_count - cols):
                 code += "set xlabel \"\"\nset format x \"\"\n"
             else:
+                xlabel = pane.get("xlabel") or "X"
                 code += f"set xlabel \"{xlabel}\"\nset format x default\n"
 
             if share_y and (idx % cols) != 0:
                 code += "set ylabel \"\"\nset format y \"\"\n"
             else:
+                ylabel = pane.get("ylabel") or "Y"
                 code += f"set ylabel \"{ylabel}\"\nset format y default\n"
 
-            pane_datasets = [ds for ds in datasets if (ds.get("pane") or "") == pane.get("id")]
-            if not pane_datasets and not is_residual:
-                pane_datasets = [primary_dataset]
+            code += f"set title \"{pane_title}\"\n"
 
+            pane_id = pane.get("id")
+            pane_datasets = dataset_by_pane.get(pane_id, [])
             plot_segments: list[str] = []
 
             if is_residual:
-                if not cfg.get("residuals", True):
-                    code += "plot NaN notitle\n"
-                    continue
-                pt = residual_dataset.get("style", {}).get("point_type", style.get("point_type", 7))
-                color = residual_dataset.get("style", {}).get("line_color", style.get("line_color", "black"))
-                residual_path = _gnuplot_path(residual_dataset["datafile"])
-                plot_segments.append(
-                    f"\"{residual_path}\" using 1:($2 - f($1)) with points pt {pt} lc rgb \"{color}\" title \"Residuals\""
-                )
-                plot_segments.append("0 with lines notitle lc rgb \"gray\"")
+                if cfg.get("residuals", True):
+                    res_style = residual_dataset.get("style", {})
+                    pt = res_style.get("point_type", style.get("point_type", 7))
+                    color = res_style.get("line_color", style.get("line_color", "black"))
+                    residual_path = _gnuplot_path(residual_dataset["datafile"])
+                    plot_segments.append(
+                        f"\"{residual_path}\" using 1:($2 - f($1)) with points pt {pt} lc rgb \"{color}\" title \"Residuals\""
+                    )
+                    plot_segments.append("0 with lines notitle lc rgb \"gray\"")
+                else:
+                    plot_segments.append("NaN notitle")
             else:
+                if not pane_datasets:
+                    pane_datasets = [primary_dataset]
                 for ds in pane_datasets:
                     ds_style = ds.get("style", {})
                     mode = ds_style.get("mode", "linespoints")
                     pt = ds_style.get("point_type")
                     lw = ds_style.get("line_width")
-                    lc = ds_style.get("line_color", fit_style.get("line_color", "black"))
+                    lc = ds_style.get("line_color", style.get("line_color", "black"))
                     ds_path = _gnuplot_path(ds["datafile"])
                     if ds.get("error_bars"):
-                        segment = f"\"{ds_path}\" using 1:2:3 with yerrorbars title \"{ds.get('label', ds['id'])}\""
+                        segment = (
+                            f"\"{ds_path}\" using 1:2:3 with yerrorbars title \"{ds.get('label', ds['id'])}\""
+                        )
                     else:
-                        segment = f"\"{ds_path}\" using 1:2 with {mode} title \"{ds.get('label', ds['id'])}\""
+                        segment = (
+                            f"\"{ds_path}\" using 1:2 with {mode} title \"{ds.get('label', ds['id'])}\""
+                        )
                     if lw is not None:
                         segment += f" lw {lw}"
                     if lc:
@@ -269,17 +278,16 @@ fit f(x) "{datafile}" via {params_csv}
                     if pt is not None and "points" in mode:
                         segment += f" pt {pt}"
                     plot_segments.append(segment)
+
                 if show_fit_line:
-                    lw = fit_style.get("line_width", 2)
-                    col = fit_style.get("line_color", "black")
+                    lw = style.get("line_width", 2)
+                    col = style.get("line_color", "black")
                     plot_segments.append(
                         f"f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
                     )
 
             if plot_segments:
-                joined = ", \
-    ".join(plot_segments)
-                code += f"plot {joined}\n"
+                code += "plot " + ", \\\n    ".join(plot_segments) + "\n"
             else:
                 code += "plot NaN notitle\n"
 
@@ -287,14 +295,15 @@ fit f(x) "{datafile}" via {params_csv}
 
     if out_residuals:
         residual_output_path = _gnuplot_path(out_residuals)
-        # Legacy hook kept for compatibility when residual-only rendering is requested
+        res_style = residual_dataset.get("style", {})
+        pt = res_style.get("point_type", style.get("point_type", 7))
         code += f"""
 set output "{residual_output_path}"
 set title "Residuals — {cfg['title']}"
 set xlabel "X"
 set ylabel "Residual (y - f(x))"
 set grid back
-plot "{_gnuplot_path(residual_dataset['datafile'])}" using 1:($2 - f($1)) with points pt {residual_dataset.get('style', {}).get('point_type', style.get('point_type', 7))} title "Residuals", \\
+plot "{_gnuplot_path(residual_dataset['datafile'])}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
      0 with lines notitle lc rgb "gray"
 unset output
 """
@@ -314,11 +323,6 @@ def infer_parameters(formula: str) -> list[str]:
         if token not in params:
             params.append(token)
     return params
-
-
-def _slugify(value: str, default: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9]+", "_", value or "").strip("_")
-    return cleaned.lower() or default
 
 
 def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
@@ -341,8 +345,9 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         style = fit.get("style", {}).copy()
         if "color" in fit and fit["color"]:
             style.setdefault("line_color", fit["color"])
-        elif "line_color" not in style:
-            style["line_color"] = "#1f77b4"
+        style.setdefault("line_color", "#1f77b4")
+        style.setdefault("line_width", 2)
+        style.setdefault("point_type", 7)
 
         initial_params = {}
         for key in params:
@@ -359,14 +364,14 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         show_legend = bool(layout_raw.get("show_legend", True))
         panes_raw = layout_raw.get("panes") if isinstance(layout_raw.get("panes"), list) else []
         panes: list[dict] = []
-        seen_panes: set[str] = set()
+        pane_ids: set[str] = set()
         for p_idx, pane in enumerate(panes_raw):
             if not isinstance(pane, dict):
                 continue
             pane_id = _slugify(str(pane.get("id") or pane.get("name") or f"pane_{p_idx+1}"), f"pane_{p_idx+1}")
-            if pane_id in seen_panes:
+            if pane_id in pane_ids:
                 pane_id = f"{pane_id}_{p_idx+1}"
-            seen_panes.add(pane_id)
+            pane_ids.add(pane_id)
             panes.append(
                 {
                     "id": pane_id,
@@ -391,6 +396,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                     "ylabel": "Y",
                 }
             )
+            pane_ids.add("main")
 
         if fit.get("residuals", True) and not any(p.get("residuals") for p in panes):
             panes.append(
@@ -404,13 +410,11 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                     "ylabel": "Residual",
                 }
             )
+            pane_ids.add("residuals")
 
         pane_slots = rows * cols
         if len(panes) > pane_slots:
             rows = math.ceil(len(panes) / cols)
-
-        datasets_raw = fit.get("datasets") if isinstance(fit.get("datasets"), list) else []
-        datasets: list[dict] = []
 
         def resolve_data_path(path: str) -> str:
             if not path:
@@ -419,18 +423,20 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                 path = os.path.abspath(os.path.join(base_dir, path))
             return path
 
+        datasets_raw = fit.get("datasets") if isinstance(fit.get("datasets"), list) else []
+        datasets: list[dict] = []
+
         if not datasets_raw:
-            single_data = fit.get("datafile") or ""
-            single_path = resolve_data_path(single_data)
+            single_path = resolve_data_path(fit.get("datafile", ""))
             if not single_path or not os.path.exists(single_path):
                 raise FileNotFoundError(
-                    f"Data file not found for fit '{fit.get('title', 'Untitled')}': {single_data or single_path}"
+                    f"Data file not found for fit '{fit.get('title', 'Untitled')}': {fit.get('datafile', single_path)}"
                 )
             datasets_raw = [
                 {
                     "id": "dataset_1",
                     "label": os.path.basename(single_path),
-                    "datafile": single_data,
+                    "datafile": single_path,
                     "pane": panes[0]["id"],
                     "style": {"line_color": style.get("line_color")},
                     "error_bars": bool(fit.get("error_bars", False)),
@@ -447,21 +453,26 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
             if ds_id in seen_dataset_ids:
                 ds_id = f"{ds_id}_{d_idx+1}"
             seen_dataset_ids.add(ds_id)
-            path = resolve_data_path(dataset.get("datafile", ""))
-            if not path or not os.path.exists(path):
-                missing_files.append(dataset.get("datafile", ""))
+
+            raw_path = dataset.get("datafile", "")
+            resolved_path = resolve_data_path(raw_path)
+            if not resolved_path or not os.path.exists(resolved_path):
+                missing_files.append(raw_path or resolved_path)
                 continue
+
             pane_id = dataset.get("pane") or panes[0]["id"]
-            if pane_id not in {p["id"] for p in panes}:
+            if pane_id not in pane_ids:
                 pane_id = panes[0]["id"]
+
             ds_style = dataset.get("style", {}) if isinstance(dataset.get("style"), dict) else {}
             ds_style = ds_style.copy()
             ds_style.setdefault("line_color", style.get("line_color", "#1f77b4"))
+
             datasets.append(
                 {
                     "id": ds_id,
                     "label": label,
-                    "datafile": path,
+                    "datafile": resolved_path,
                     "pane": pane_id,
                     "style": ds_style,
                     "error_bars": bool(dataset.get("error_bars", False)),
@@ -476,16 +487,15 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         if not datasets:
             raise ValueError(f"No valid datasets defined for fit '{fit.get('title', 'Untitled')}'")
 
-        fit_dataset = fit.get("fit_dataset") or datasets[0]["id"]
         dataset_ids = {ds["id"] for ds in datasets}
+        fit_dataset = fit.get("fit_dataset") or next(iter(dataset_ids))
         if fit_dataset not in dataset_ids:
-            # Try to match by label
             for ds in datasets:
                 if ds.get("label") == fit_dataset:
                     fit_dataset = ds["id"]
                     break
             else:
-                fit_dataset = datasets[0]["id"]
+                fit_dataset = next(iter(dataset_ids))
 
         residual_dataset = fit.get("residual_dataset") or fit_dataset
         if residual_dataset not in dataset_ids:
@@ -498,7 +508,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
 
         normalized.append(
             {
-                "title": fit.get("title", "Untitled"),
+                "title": fit.get("title", f"Fit {idx+1}"),
                 "fit_formula": formula,
                 "residuals": bool(fit.get("residuals", True)),
                 "style": style,
@@ -533,7 +543,7 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
 
-    out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
+    out_plot = _gnuplot_path(os.path.join(plot_dir, "plot.png"))
 
     # --- Main fit ---
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
@@ -545,15 +555,13 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     fit_dataset = dataset_lookup.get(plot_cfg.get("fit_dataset")) or (datasets[0] if datasets else None)
     residual_dataset = dataset_lookup.get(plot_cfg.get("residual_dataset")) or fit_dataset
 
-    # --- Optional residuals metrics ---
     residuals_embedded = False
+    residuals_path = None
+    metrics = None
+
     if params and plot_cfg.get("residuals", True) and residual_dataset:
         metrics = compute_residual_metrics(residual_dataset["datafile"], params, plot_cfg["fit_formula"])
         residuals_embedded = True
-        residuals_path = None
-    else:
-        residuals_path = None
-        metrics = None
 
     # --- Package result ---
     result = {

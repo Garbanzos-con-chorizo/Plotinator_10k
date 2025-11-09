@@ -1,103 +1,103 @@
 {
-  "fits": [
-    {
-      "title": "Linear Fit Example",
-      "formula": "a*x + b",
-      "residuals": true,
-      "color": "#1f77b4",
-      "parameters": {
-        "a": 1.0,
-        "b": 1.0
-      },
-      "layout": {
-        "rows": 2,
-        "columns": 1,
-        "share_x": true,
-        "share_y": false,
-        "show_legend": true,
-        "panes": [
-          {
-            "id": "main",
-            "title": "Linear Fit",
-            "legend": true
-          },
-          {
-            "id": "residuals",
-            "title": "Residuals",
-            "legend": false,
+    "fits": [
+        {
+            "title": "Linear Fit Example",
+            "formula": "a*x + b",
+            "color": "#1f77b4",
             "residuals": true,
-            "show_fit": false
-          }
-        ]
-      },
-      "datasets": [
-        {
-          "id": "sample1",
-          "label": "Sample 1",
-          "datafile": "data/sample1.dat",
-          "pane": "main",
-          "style": {
-            "mode": "points",
-            "line_color": "#1f77b4",
-            "point_type": 7,
-            "line_width": 2
-          }
-        }
-      ],
-      "fit_dataset": "sample1",
-      "residual_dataset": "sample1"
-    },
-    {
-      "title": "Exponential Fit Example",
-      "formula": "A * exp(B * x)",
-      "residuals": true,
-      "color": "#ff6f61",
-      "layout": {
-        "rows": 1,
-        "columns": 2,
-        "share_x": false,
-        "share_y": false,
-        "show_legend": true,
-        "panes": [
-          {
-            "id": "dataset_a",
-            "title": "Dataset A",
-            "legend": true
-          },
-          {
-            "id": "dataset_b",
-            "title": "Dataset B",
-            "legend": true
-          }
-        ]
-      },
-      "datasets": [
-        {
-          "id": "exp_a",
-          "label": "Sample 2",
-          "datafile": "data/sample2.dat",
-          "pane": "dataset_a",
-          "style": {
-            "mode": "linespoints",
-            "line_color": "#ff6f61",
-            "point_type": 5,
-            "line_width": 2
-          }
+            "parameters": {
+                "a": 1.0,
+                "b": 1.0
+            },
+            "layout": {
+                "rows": 2,
+                "columns": 1,
+                "share_x": true,
+                "share_y": false,
+                "show_legend": true,
+                "panes": [
+                    {
+                        "id": "main",
+                        "title": "Linear Fit",
+                        "legend": true
+                    },
+                    {
+                        "id": "residuals",
+                        "title": "Residuals",
+                        "legend": false,
+                        "residuals": true,
+                        "show_fit": false
+                    }
+                ]
+            },
+            "datasets": [
+                {
+                    "id": "sample1",
+                    "label": "Sample 1",
+                    "datafile": "data/sample1.dat",
+                    "pane": "main",
+                    "style": {
+                        "mode": "points",
+                        "line_color": "#1f77b4",
+                        "point_type": 7,
+                        "line_width": 2
+                    }
+                }
+            ],
+            "fit_dataset": "sample1",
+            "residual_dataset": "sample1"
         },
         {
-          "id": "exp_b",
-          "label": "Sample 3",
-          "datafile": "data/sample3.dat",
-          "pane": "dataset_b",
-          "style": {
-            "mode": "lines",
-            "line_color": "#2ca02c",
-            "line_width": 3
-          }
+            "title": "Exponential Fit Example",
+            "formula": "A * exp(B * x)",
+            "color": "#ff6f61",
+            "residuals": true,
+            "layout": {
+                "rows": 1,
+                "columns": 2,
+                "share_x": false,
+                "share_y": false,
+                "show_legend": true,
+                "panes": [
+                    {
+                        "id": "dataset_a",
+                        "title": "Dataset A",
+                        "legend": true
+                    },
+                    {
+                        "id": "dataset_b",
+                        "title": "Dataset B",
+                        "legend": true
+                    }
+                ]
+            },
+            "datasets": [
+                {
+                    "id": "exp_a",
+                    "label": "Sample 2",
+                    "datafile": "data/sample2.dat",
+                    "pane": "dataset_a",
+                    "style": {
+                        "mode": "linespoints",
+                        "line_color": "#ff6f61",
+                        "point_type": 5,
+                        "line_width": 2
+                    }
+                },
+                {
+                    "id": "exp_b",
+                    "label": "Sample 3",
+                    "datafile": "data/sample3.dat",
+                    "pane": "dataset_b",
+                    "style": {
+                        "mode": "lines",
+                        "line_color": "#2ca02c",
+                        "line_width": 3
+                    }
+                }
+            ],
+            "fit_dataset": "exp_a",
+            "residual_dataset": "exp_a"
         }
-      ],
-      "fit_dataset": "exp_a",
-      "residual_dataset": "exp_a"
-    }
-  ]
+    ]
 }

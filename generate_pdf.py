@@ -63,7 +63,11 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
             for ds in datasets:
                 label = ds.get("label") or ds.get("id")
                 pane = ds.get("pane", "-")
-                source = os.path.relpath(ds.get("datafile", ""), output_folder).replace("\\", "/") if ds.get("datafile") else ""
+                datafile = ds.get("datafile")
+                if datafile:
+                    source = os.path.relpath(datafile, output_folder).replace("\\", "/")
+                else:
+                    source = ""
                 md.append(f"| {label} | {pane} | {source} |")
 
         # Parameters table
