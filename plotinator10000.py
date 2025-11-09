@@ -4,10 +4,22 @@ import subprocess, os, json, threading, platform, webbrowser
 import ttkbootstrap as ttkb  # pip install ttkbootstrap
 import shutil
 import re
+import math
+import numpy as np
+import matplotlib
+
+matplotlib.use("TkAgg")
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+import matplotlib.image as mpimg
 from ttkbootstrap.constants import *
 
 
 CONFIG_PATH = "config.json"
+
+MATH_FUNCS = {name: getattr(math, name) for name in dir(math) if not name.startswith("_")}
+SAFE_EVAL_GLOBALS = {"__builtins__": {}, "np": np, "math": math}
+SAFE_EVAL_GLOBALS.update(MATH_FUNCS)
 
 class PlotinatorApp(ttkb.Window):
     def __init__(self):
@@ -18,9 +30,14 @@ class PlotinatorApp(ttkb.Window):
 
         self.folder = None
         self.config_data = {}
+        self.preview_payload = None
+        self.current_preview_manual = None
+        self.preview_has_content = False
+        self._preview_after_id = None
 
         self.create_widgets()  # creates self.tree
         self.tree.bind("<Double-1>", self.on_double_click)  # bind AFTER creation
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.load_config()
 
 
@@ -50,13 +67,21 @@ class PlotinatorApp(ttkb.Window):
             ("🚀 Run Batch", self.run_batch, "success"),
             ("📘 Open Report", self.open_latest_report, "primary-outline"),
             ("➕ Add Fit", self.add_fit, "success-outline"),
-            ("🗑 Delete Fit", self.delete_fit, "danger-outline")
+            ("🗑 Delete Fit", self.delete_fit, "danger-outline"),
+            ("👁 Preview Fit", self.preview_selected_fit, "primary")
         ]
         for i, (txt, cmd, style) in enumerate(buttons):
             ttkb.Button(toolbar, text=txt, command=cmd, bootstyle=style).grid(row=0, column=i, padx=6)
 
-        # --- Table ---
-        table_frame = ttkb.Frame(self, padding=10)
+        # --- Content area ---
+        content = ttkb.Frame(self)
+        content.pack(fill="both", expand=True)
+
+        # --- Left column: table + logs ---
+        left_column = ttkb.Frame(content, padding=10)
+        left_column.pack(side="left", fill="both", expand=True)
+
+        table_frame = ttkb.Frame(left_column)
         table_frame.pack(fill="both", expand=True)
 
         self.tree = ttkb.Treeview(
@@ -69,7 +94,7 @@ class PlotinatorApp(ttkb.Window):
         for col, width in [("Title", 180), ("Formula", 260), ("Data", 220), ("Residuals", 80)]:
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
-        self.tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.tree.pack(fill="both", expand=True, pady=(0, 10))
 
         # Zebra stripes
         self.style.configure("Treeview", rowheight=30)
@@ -77,13 +102,70 @@ class PlotinatorApp(ttkb.Window):
         self.tree.tag_configure("even", background="#1c1f26")
 
         # --- Progress + Log Console ---
-        self.progress = ttkb.Progressbar(self, mode="determinate", bootstyle="info-striped")
-        self.progress.pack(fill="x", padx=15, pady=10)
+        self.progress = ttkb.Progressbar(left_column, mode="determinate", bootstyle="info-striped")
+        self.progress.pack(fill="x", pady=(0, 10))
 
-        self.log_text = tk.Text(self, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14",
+        self.log_text = tk.Text(left_column, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14",
                                 font=("Consolas", 10), relief="flat", borderwidth=6,
                                 highlightthickness=1, highlightbackground="#3fa9f5")
-        self.log_text.pack(fill="both", expand=True, padx=15, pady=5)
+        self.log_text.pack(fill="both", expand=True)
+
+        # --- Right column: live preview ---
+        preview_column = ttkb.Frame(content, padding=10, width=420)
+        preview_column.pack(side="right", fill="both", expand=False)
+
+        preview_container = ttkb.Labelframe(preview_column, text="Live Preview", padding=10, bootstyle="info")
+        preview_container.pack(fill="both", expand=True)
+
+        controls = ttkb.Frame(preview_container)
+        controls.pack(fill="x", pady=(0, 10))
+
+        self.preview_mode = tk.StringVar(value="plot")
+
+        mode_frame = ttkb.Frame(controls)
+        mode_frame.pack(side="left", padx=5)
+
+        self.preview_plot_button = ttkb.Radiobutton(
+            mode_frame,
+            text="Fit",
+            variable=self.preview_mode,
+            value="plot",
+            bootstyle="info-toolbutton",
+            command=self.refresh_preview_canvas
+        )
+        self.preview_plot_button.pack(side="left", padx=2)
+
+        self.preview_residual_button = ttkb.Radiobutton(
+            mode_frame,
+            text="Residuals",
+            variable=self.preview_mode,
+            value="residuals",
+            bootstyle="info-toolbutton",
+            command=self.refresh_preview_canvas
+        )
+        self.preview_residual_button.pack(side="left", padx=2)
+
+        button_frame = ttkb.Frame(controls)
+        button_frame.pack(side="right")
+
+        ttkb.Button(button_frame, text="🔄 Refresh", command=self.preview_selected_fit, bootstyle="primary-outline").pack(side="left", padx=4)
+        ttkb.Button(button_frame, text="📸 Snapshot", command=self.export_snapshot, bootstyle="success-outline").pack(side="left", padx=4)
+        ttkb.Button(button_frame, text="🧹 Clear", command=self.clear_preview, bootstyle="secondary-outline").pack(side="left", padx=4)
+
+        self.preview_status_var = tk.StringVar(value="No preview loaded")
+        ttkb.Label(preview_container, textvariable=self.preview_status_var, anchor="w", bootstyle="light").pack(fill="x", pady=(0, 5))
+
+        canvas_frame = ttkb.Frame(preview_container)
+        canvas_frame.pack(fill="both", expand=True)
+
+        self.preview_fig = Figure(figsize=(5, 4), dpi=100)
+        self.preview_canvas = FigureCanvasTkAgg(self.preview_fig, master=canvas_frame)
+        self.preview_toolbar = NavigationToolbar2Tk(self.preview_canvas, canvas_frame, pack_toolbar=False)
+        self.preview_toolbar.update()
+        self.preview_toolbar.pack(fill="x", pady=(0, 5))
+        self.preview_canvas.get_tk_widget().pack(fill="both", expand=True)
+
+        self.clear_preview()
 
     def toggle_theme(self):
         current = self.style.theme.name
@@ -275,6 +357,254 @@ class PlotinatorApp(ttkb.Window):
         self.show_toast(f"🗑 Deleted '{fit.get('title', 'Unnamed Fit')}'", level="info")
 
 
+    # --- Preview handling -------------------------------------------------
+    def on_tree_select(self, _event=None):
+        if self._preview_after_id:
+            self.after_cancel(self._preview_after_id)
+        self._preview_after_id = self.after(160, self.preview_selected_fit)
+
+    def _set_residual_availability(self, available: bool):
+        state = "normal" if available else "disabled"
+        try:
+            self.preview_residual_button.config(state=state)
+        except Exception:
+            return
+        if not available and self.preview_mode.get() == "residuals":
+            self.preview_mode.set("plot")
+
+    def _render_empty_preview(self, message: str = "No preview loaded"):
+        if not hasattr(self, "preview_fig"):
+            return
+        self.preview_fig.clear()
+        ax = self.preview_fig.add_subplot(111)
+        ax.axis("off")
+        ax.text(0.5, 0.5, message, ha="center", va="center", transform=ax.transAxes, color="#8a9aa9", fontsize=12)
+        self.preview_canvas.draw_idle()
+        self.preview_toolbar.update()
+        self.preview_has_content = False
+
+    def clear_preview(self):
+        self.preview_payload = None
+        self.current_preview_manual = None
+        self.preview_has_content = False
+        self._set_residual_availability(False)
+        self.preview_status_var.set("No preview loaded")
+        self._render_empty_preview()
+
+    def refresh_preview_canvas(self):
+        if self.preview_payload:
+            self._render_payload_preview()
+        elif self.current_preview_manual:
+            self._render_manual_preview()
+        else:
+            self._render_empty_preview()
+
+    def _render_payload_preview(self):
+        payload = self.preview_payload or {}
+        mode = self.preview_mode.get()
+        path_key = "residuals_path" if mode == "residuals" else "plot_path"
+        path = payload.get(path_key)
+        if not path or not os.path.exists(path):
+            fallback = payload.get("plot_path")
+            if fallback and os.path.exists(fallback):
+                self.preview_mode.set("plot")
+                path = fallback
+            else:
+                self.preview_has_content = False
+                self._render_empty_preview("Preview image not available yet")
+                return
+
+        try:
+            image = mpimg.imread(path)
+        except Exception as exc:
+            self.preview_has_content = False
+            self._render_empty_preview(f"Failed to load preview:\n{exc}")
+            return
+
+        self.preview_fig.clear()
+        ax = self.preview_fig.add_subplot(111)
+        ax.imshow(image)
+        ax.axis("off")
+        title = payload.get("title") or os.path.basename(path)
+        ax.set_title(title, color="#dbe9ff", fontsize=11)
+        self.preview_fig.tight_layout()
+        self.preview_canvas.draw_idle()
+        self.preview_toolbar.update()
+        self.preview_has_content = True
+        residual_available = bool(payload.get("residuals_path") and os.path.exists(payload.get("residuals_path")))
+        self._set_residual_availability(residual_available)
+
+    def _render_manual_preview(self):
+        data = self.current_preview_manual or {}
+        mode = self.preview_mode.get()
+        residuals = data.get("residuals")
+
+        if mode == "residuals" and residuals is None:
+            self.preview_mode.set("plot")
+            mode = "plot"
+
+        self.preview_fig.clear()
+        ax = self.preview_fig.add_subplot(111)
+
+        if mode == "residuals" and residuals is not None:
+            ax.axhline(0.0, color="#8899aa", linestyle="--", linewidth=1)
+            ax.scatter(data.get("x"), residuals, color="#ff7f50", s=30, label="Residuals")
+            ax.set_ylabel("y - f(x)")
+            ax.set_xlabel("x")
+            ax.grid(alpha=0.25)
+        else:
+            if data.get("yerr") is not None:
+                ax.errorbar(data.get("x"), data.get("y"), yerr=data.get("yerr"), fmt="o", color="#1f77b4", ecolor="#4aa6ff", capsize=3, label="Data ±σ")
+            else:
+                ax.scatter(data.get("x"), data.get("y"), color="#1f77b4", s=36, label="Data")
+
+            if data.get("x_curve") is not None and data.get("y_curve") is not None:
+                ax.plot(data.get("x_curve"), data.get("y_curve"), color=data.get("line_color", "#ff7f0e"), linewidth=2, label="Fit curve")
+
+            ax.set_xlabel("x")
+            ax.set_ylabel("y")
+            ax.grid(alpha=0.25)
+
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(loc="best")
+
+        self.preview_fig.tight_layout()
+        self.preview_canvas.draw_idle()
+        self.preview_toolbar.update()
+        self.preview_has_content = True
+        self._set_residual_availability(residuals is not None)
+
+    def handle_preview_payload(self, payload: dict):
+        self.preview_payload = payload
+        self.current_preview_manual = None
+        title = payload.get("title", "")
+        self.preview_status_var.set(f"Batch preview: {title}")
+        self.refresh_preview_canvas()
+
+    def preview_selected_fit(self, _event=None):
+        self._preview_after_id = None
+        item_id = self.tree.focus()
+        if not item_id:
+            selection = self.tree.selection()
+            if selection:
+                item_id = selection[0]
+        if not item_id:
+            return
+
+        index = self.tree.index(item_id)
+        fits = self.config_data.get("fits", [])
+        if index >= len(fits):
+            return
+
+        fit = fits[index]
+        datafile = fit.get("datafile")
+        if not datafile:
+            self.preview_status_var.set("Preview unavailable: missing data file")
+            self._set_residual_availability(False)
+            self._render_empty_preview("Select a data file to preview")
+            return
+
+        if not os.path.isabs(datafile):
+            datafile = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), datafile))
+
+        if not os.path.exists(datafile):
+            self.preview_status_var.set("Preview unavailable: data file not found")
+            self._set_residual_availability(False)
+            self._render_empty_preview("Data file not found")
+            return
+
+        def worker():
+            try:
+                data = np.loadtxt(datafile, ndmin=2)
+            except Exception as exc:
+                self.after(0, lambda: self.show_toast(f"⚠️ Preview load error: {exc}", level="warning"))
+                self.after(0, lambda: self._render_empty_preview("Failed to load data"))
+                return
+
+            if data.shape[1] < 2:
+                self.after(0, lambda: self._render_empty_preview("Data must have at least two columns"))
+                return
+
+            x = data[:, 0]
+            y = data[:, 1]
+            yerr = data[:, 2] if data.shape[1] >= 3 else None
+
+            params = {}
+            for key, value in (fit.get("parameters") or {}).items():
+                try:
+                    params[key] = float(value)
+                except (TypeError, ValueError):
+                    continue
+
+            formula = fit.get("formula") or "a*x + b"
+            for name in self.extract_parameters_from_formula(formula):
+                params.setdefault(name, 1.0)
+
+            try:
+                dense_x = np.linspace(np.min(x), np.max(x), 400)
+            except ValueError:
+                dense_x = x
+
+            try:
+                locals_env = params.copy()
+                locals_env["x"] = dense_x
+                y_curve = np.array(eval(formula, SAFE_EVAL_GLOBALS, locals_env), dtype=float)
+
+                locals_env = params.copy()
+                locals_env["x"] = x
+                y_fit = np.array(eval(formula, SAFE_EVAL_GLOBALS, locals_env), dtype=float)
+            except Exception as exc:
+                self.after(0, lambda: self.show_toast(f"⚠️ Preview formula error: {exc}", level="warning"))
+                self.after(0, lambda: self._render_empty_preview("Formula could not be evaluated"))
+                return
+
+            residuals = y - y_fit if y_fit.shape == y.shape else None
+
+            payload = {
+                "title": fit.get("title", "Preview"),
+                "x": x,
+                "y": y,
+                "yerr": yerr,
+                "x_curve": dense_x,
+                "y_curve": y_curve,
+                "residuals": residuals,
+                "line_color": fit.get("color", "#ff7f0e"),
+            }
+
+            self.after(0, lambda p=payload: self._handle_manual_preview_ready(p))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _handle_manual_preview_ready(self, payload: dict):
+        self.current_preview_manual = payload
+        self.preview_payload = None
+        self.preview_mode.set(self.preview_mode.get())  # keep current selection
+        self.preview_status_var.set(f"Config preview: {payload.get('title', 'Preview')}")
+        self.refresh_preview_canvas()
+
+    def export_snapshot(self):
+        if not self.preview_has_content:
+            self.show_toast("⚠️ No preview to export", level="warning")
+            return
+
+        filetypes = [("PNG", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")]
+        path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=filetypes, title="Export preview snapshot")
+        if not path:
+            return
+
+        try:
+            self.preview_fig.savefig(path, dpi=300)
+        except Exception as exc:
+            self.show_toast(f"❌ Snapshot failed: {exc}", level="error")
+        else:
+            self.show_toast(f"📸 Snapshot saved: {os.path.basename(path)}", level="success")
+
+    def _reset_progress(self):
+        self.progress.stop()
+        self.progress.config(mode="determinate", value=0)
+
+
     def edit_fit(self, index):
         """Open the edit window for a specific fit index."""
         fit = self.config_data["fits"][index]
@@ -464,6 +794,7 @@ class PlotinatorApp(ttkb.Window):
         self.log_text.delete("1.0", tk.END)
         self.progress.config(mode="indeterminate")
         self.progress.start(10)
+        self.preview_status_var.set("Awaiting batch previews...")
 
         def run_backend():
             try:
@@ -471,26 +802,36 @@ class PlotinatorApp(ttkb.Window):
                     [sys.executable, backend_script, config_path],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True
+                    text=True,
+                    bufsize=1
                 )
                 for line in iter(process.stdout.readline, ""):
-                    self.log_text.insert("end", line)
-                    self.log_text.see("end")
-                    self.update_idletasks()  # keeps UI responsive
+                    stripped = line.rstrip()
+                    if stripped.startswith("[PREVIEW]"):
+                        try:
+                            payload_json = stripped.split(" ", 1)[1]
+                            payload = json.loads(payload_json)
+                        except (IndexError, json.JSONDecodeError):
+                            self.after(0, lambda msg=stripped: self.log(msg))
+                        else:
+                            self.after(0, lambda msg=stripped: self.log(msg))
+                            self.after(0, lambda p=payload: self.handle_preview_payload(p))
+                        continue
+
+                    self.after(0, lambda msg=stripped: self.log(msg))
                 process.wait()
 
                 if process.returncode == 0:
-                    self.show_toast("✅ Batch completed successfully", level="success")
+                    self.after(0, lambda: self.show_toast("✅ Batch completed successfully", level="success"))
                 else:
-                    self.show_toast("❌ Batch failed (see log)", level="error")
+                    self.after(0, lambda: self.show_toast("❌ Batch failed (see log)", level="error"))
 
             except Exception as e:
-                self.log_text.insert("end", f"\n⚠️ Exception: {e}\n")
-                self.show_toast("⚠️ Backend error (see log)", level="error")
+                self.after(0, lambda: self.log(f"⚠️ Exception: {e}"))
+                self.after(0, lambda: self.show_toast("⚠️ Backend error (see log)", level="error"))
 
             finally:
-                self.progress.stop()
-                self.progress.config(mode="determinate", value=0)
+                self.after(0, self._reset_progress)
 
         threading.Thread(target=run_backend, daemon=True).start()
 

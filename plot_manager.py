@@ -298,6 +298,13 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
         "residuals_plot": residuals_path,
     }
 
+    preview_payload = {
+        "title": plot_cfg["title"],
+        "plot_path": out_plot,
+        "residuals_path": residuals_path,
+    }
+
+    print(f"[PREVIEW] {json.dumps(preview_payload)}", flush=True)
     print(f"[OK] Finished: {plot_cfg['title']}")
     return result
 
