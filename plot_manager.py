@@ -145,19 +145,320 @@ def generate_gnuplot_code(
         else StyleConfig.from_dict(raw_style, fallback_color=cfg.get("color"))
     )
 
-    geometry_info = cfg.get("geometry") or {"type": "curve", "options": {}}
-    geometry_type = geometry_info.get("type", "curve")
-    geometry = GEOMETRY_REGISTRY.get(geometry_type)
+    pt = style_cfg.point_type
+    lw = style_cfg.line_width
+    col = style_cfg.line_color
 
-    if out_residuals and not geometry.supports_residuals:
-        out_residuals = None
+    formula = cfg["fit_formula"]
+    params = cfg["fit_params"]
+    params_csv = ",".join(params)
+    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
+    column_map = cfg.get("column_map", {})
+    x_col = column_map.get("x", 1)
+    y_col = column_map.get("y", 2)
+    err_col = column_map.get("error")
+    weight_col = column_map.get("weight")
+    use_err = bool(err_col)
 
-    return geometry.generate_gnuplot_script(
-        cfg,
-        style_cfg,
-        out_plot=out_plot,
-        out_residuals=out_residuals,
+    def _style_commands(
+        title: str,
+        x_label: str,
+        y_label: str,
+        *,
+        force_linear_y: bool = False,
+        include_terminal: bool = True,
+        include_title: bool = True,
+        show_legend: bool | None = None,
+        suppress_xlabel: bool = False,
+        suppress_ylabel: bool = False,
+        suppress_xtics: bool = False,
+        suppress_ytics: bool = False,
+    ) -> str:
+        lines: list[str] = ["set encoding utf8"]
+
+        if include_terminal:
+            lines.append(
+                f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\""
+            )
+
+        if include_title:
+            lines.append(
+                f"set title \"{_escape(title)}\" font \",{style_cfg.title_font_size}\""
+            )
+        else:
+            lines.append("unset title")
+
+        if suppress_xlabel:
+            lines.append("set xlabel \"\"")
+        else:
+            lines.append(
+                f"set xlabel \"{_escape(x_label)}\" font \",{style_cfg.axis_label_font_size}\""
+            )
+
+        if suppress_ylabel:
+            lines.append("set ylabel \"\"")
+        else:
+            lines.append(
+                f"set ylabel \"{_escape(y_label)}\" font \",{style_cfg.axis_label_font_size}\""
+            )
+
+        lines.append(f"set xtics font \",{style_cfg.tick_font_size}\"")
+        lines.append(f"set ytics font \",{style_cfg.tick_font_size}\"")
+
+        if style_cfg.x_scale == "log":
+            lines.append("set logscale x")
+        else:
+            lines.append("unset logscale x")
+
+        if not force_linear_y and style_cfg.y_scale == "log":
+            lines.append("set logscale y")
+        else:
+            lines.append("unset logscale y")
+
+        if suppress_xtics:
+            lines.append("set format x \"\"")
+        elif style_cfg.x_tick_format:
+            lines.append(f"set format x \"{_escape(style_cfg.x_tick_format)}\"")
+        else:
+            lines.append("set format x")
+
+        if suppress_ytics:
+            lines.append("set format y \"\"")
+        elif style_cfg.y_tick_format and not force_linear_y:
+            lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
+        else:
+            lines.append("set format y")
+
+        if style_cfg.grid:
+            lines.append(f"set grid {style_cfg.grid_layer}")
+        else:
+            lines.append("unset grid")
+
+        if show_legend is None:
+            show_legend = style_cfg.legend_visible
+
+        if show_legend and not force_linear_y:
+            lines.append(style_cfg.legend_gnuplot_clause())
+        else:
+            lines.append("unset key")
+
+        return "\n".join(lines)
+
+    guesses = estimate_initial_params(datafile, params, column_map)
+    overrides = cfg.get("initial_params") or {}
+    for key, value in overrides.items():
+        if key in guesses and isinstance(value, (int, float)):
+            guesses[key] = float(value)
+    init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
+    prints = "\n".join(
+        [
+            (
+                f'if (exists("{p}_err")) {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) }} '
+                f'else {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
+            )
+            for p in params
+        ]
     )
+
+    fit_using: list[str] = []
+    if x_col != 1 or y_col != 2 or err_col or weight_col:
+        fit_using.extend([str(x_col), str(y_col)])
+        if err_col:
+            fit_using.append(str(err_col))
+        elif weight_col:
+            fit_using.append(str(weight_col))
+
+    fit_clause = f'fit f(x) "{datafile}"'
+    if fit_using:
+        fit_clause += f" using {':'.join(fit_using)}"
+    fit_clause += f" via {params_csv}"
+
+    layout_cfg = _normalize_layout(cfg.get("layout"))
+
+    base_style = _style_commands(
+        cfg["title"],
+        style_cfg.axis_label_with_unit("x"),
+        style_cfg.axis_label_with_unit("y"),
+        include_title=not bool(out_plot),
+        show_legend=False,
+    )
+
+    lines: list[str] = [
+        base_style,
+        "",
+        "set fit errorvariables",
+        init_lines,
+        "",
+        f"f(x) = {formula}",
+        fit_clause,
+        "",
+        prints,
+        "",
+    ]
+
+    if out_plot:
+        out_plot_path = os.path.abspath(out_plot).replace("\\", "/")
+        datasets = list(cfg.get("datasets") or [])
+        if not datasets:
+            datasets = [
+                {
+                    "label": cfg.get("title", "Dataset"),
+                    "datafile": datafile,
+                    "column_map": column_map,
+                    "error_bars": use_err,
+                    "style_model": style_cfg,
+                    "style": style_cfg.to_dict(),
+                }
+            ]
+
+        pane_groups: dict[int, list[dict]] = {}
+        pane_titles: dict[int, str] = {}
+        name_slots: dict[str, int] = {}
+        max_slot = 0
+
+        for idx, dataset in enumerate(datasets, start=1):
+            ds = dataset
+            pane_title = None
+            slot: int | None = None
+
+            pane_index = ds.get("pane_index")
+            if pane_index is not None:
+                try:
+                    slot = int(pane_index)
+                except (TypeError, ValueError):
+                    slot = None
+                else:
+                    if slot <= 0:
+                        slot = None
+
+            if slot is None:
+                pane_name = ds.get("pane")
+                if pane_name:
+                    pane_key = str(pane_name)
+                    slot = name_slots.setdefault(pane_key, len(name_slots) + 1)
+                    pane_title = pane_key
+
+            if slot is None:
+                slot = 1
+
+            if pane_title is None:
+                pane_title = (
+                    str(ds.get("pane"))
+                    if ds.get("pane")
+                    else ds.get("label")
+                    or f"Pane {slot}"
+                )
+
+            pane_groups.setdefault(slot, []).append(ds)
+            pane_titles.setdefault(slot, pane_title)
+            max_slot = max(max_slot, slot)
+
+        rows = max(1, int(layout_cfg.get("rows", 1)))
+        columns = max(1, int(layout_cfg.get("columns", 1)))
+        total_slots = max(rows * columns, max_slot or 1)
+        shared_x = bool(layout_cfg.get("shared_x"))
+        shared_y = bool(layout_cfg.get("shared_y"))
+        show_legend = bool(layout_cfg.get("show_legend", True))
+
+        lines.append(f"set output \"{out_plot_path}\"")
+        lines.append(
+            f"set multiplot layout {rows},{columns} title \"{_escape(cfg['title'])}\""
+        )
+
+        x_label = style_cfg.axis_label_with_unit("x")
+        y_label = style_cfg.axis_label_with_unit("y")
+
+        for slot in range(1, total_slots + 1):
+            pane_datasets = pane_groups.get(slot, [])
+            pane_title = pane_titles.get(slot, f"{cfg['title']} — Pane {slot}")
+            row_idx = (slot - 1) // columns if columns else 0
+            col_idx = (slot - 1) % columns if columns else 0
+
+            suppress_xlabel = shared_x and row_idx < rows - 1
+            suppress_ylabel = shared_y and col_idx > 0
+
+            pane_style = _style_commands(
+                pane_title,
+                x_label,
+                y_label,
+                include_terminal=False,
+                show_legend=show_legend and bool(pane_datasets),
+                suppress_xlabel=suppress_xlabel,
+                suppress_ylabel=suppress_ylabel,
+                suppress_xtics=suppress_xlabel,
+                suppress_ytics=suppress_ylabel,
+            )
+            lines.append(pane_style)
+
+            if not pane_datasets:
+                lines.append("plot NaN notitle")
+                continue
+
+            plot_parts: list[str] = []
+            for ds in pane_datasets:
+                ds_style_model = ds.get("style_model")
+                if not isinstance(ds_style_model, StyleConfig):
+                    ds_style_model = StyleConfig.from_dict(
+                        ds.get("style"), fallback_color=style_cfg.line_color
+                    )
+                ds_file = os.path.abspath(ds.get("datafile", datafile)).replace("\\", "/")
+                ds_cols = ds.get("column_map") or {}
+                dx = int(ds_cols.get("x", 1))
+                dy = int(ds_cols.get("y", 2))
+                derr = ds_cols.get("error")
+                dlabel = ds.get("label") or f"Dataset {slot}"
+
+                if derr:
+                    plot_parts.append(
+                        (
+                            f"\"{ds_file}\" using {dx}:{dy}:{derr} with yerrorbars "
+                            f"title \"{_escape(dlabel)}\" pt {ds_style_model.point_type} "
+                            f"lw {ds_style_model.line_width} lc rgb \"{ds_style_model.line_color}\""
+                        )
+                    )
+                else:
+                    plot_parts.append(
+                        (
+                            f"\"{ds_file}\" using {dx}:{dy} with points "
+                            f"title \"{_escape(dlabel)}\" pt {ds_style_model.point_type} "
+                            f"lc rgb \"{ds_style_model.line_color}\""
+                        )
+                    )
+
+            plot_parts.append(
+                (
+                    f"f(x) title sprintf(\"{formula}\") with lines "
+                    f"lw {lw} lc rgb \"{col}\""
+                )
+            )
+
+            lines.append("plot " + ", \\\n+     ".join(plot_parts))
+
+        lines.append("unset multiplot")
+        lines.append("unset output")
+        lines.append("")
+
+    if out_residuals:
+        out_res_path = os.path.abspath(out_residuals).replace("\\", "/")
+        residual_style = _style_commands(
+            f"Residuals — {cfg['title']}",
+            style_cfg.axis_label_with_unit("x"),
+            "Residual (y - f(x))",
+            force_linear_y=True,
+            include_terminal=not bool(out_plot),
+            show_legend=False,
+        )
+        lines.append(f"set output \"{out_res_path}\"")
+        lines.append(residual_style)
+        lines.append(
+            (
+                f"plot \"{datafile}\" using {x_col}:(column({y_col}) - f(column({x_col}))) "
+                f"with points pt {pt} title \"Residuals\", \\\n+     0 with lines notitle lc rgb \"gray\""
+            )
+        )
+        lines.append("unset output")
+
+    return "\n".join(lines)
 
 
 def _ensure_columns_dict(columns: dict | None) -> dict:
@@ -593,8 +894,70 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
 
     out_plot = os.path.join(plot_dir, "plot.png").replace("\\", "/")
 
-    data_prep = prepare_datafile(plot_cfg, plot_dir)
-    plot_cfg["datafile"] = data_prep["path"]
+    datasets_cfg = list(plot_cfg.get("datasets") or [])
+    if not datasets_cfg:
+        datasets_cfg = [
+            {
+                "label": plot_cfg.get("title", "Dataset"),
+                "datafile": plot_cfg.get("datafile"),
+                "column_map": plot_cfg.get("column_map", {}),
+                "error_bars": plot_cfg.get("error_bars"),
+                "style_model": plot_cfg.get("style_model"),
+                "style": plot_cfg.get("style"),
+                "data_source": plot_cfg.get("data_source", {}),
+            }
+        ]
+
+    prepared_datasets: list[dict] = []
+    datasets_report: list[dict] = []
+
+    for idx, dataset in enumerate(datasets_cfg, start=1):
+        ds_copy = copy.deepcopy(dataset)
+        dataset_dir = os.path.join(plot_dir, f"dataset_{idx}")
+        os.makedirs(dataset_dir, exist_ok=True)
+
+        prep_cfg = {
+            "data_source": ds_copy.get("data_source"),
+            "datafile": ds_copy.get("datafile"),
+        }
+        prep_info = dict(prepare_datafile(prep_cfg, dataset_dir))
+        prep_info["path"] = os.path.abspath(prep_info["path"]).replace("\\", "/")
+        prepared_path = prep_info["path"]
+        ds_copy["datafile"] = prepared_path
+        ds_copy["prepared_data"] = prep_info
+
+        prepared_datasets.append(ds_copy)
+
+        ds_data_source = copy.deepcopy(ds_copy.get("data_source", {}))
+        if ds_data_source.get("path"):
+            ds_data_source["path"] = os.path.abspath(ds_data_source["path"]).replace(
+                "\\", "/"
+            )
+
+        ds_copy["data_source"] = ds_data_source
+
+        datasets_report.append(
+            {
+                "label": ds_copy.get("label"),
+                "pane": ds_copy.get("pane"),
+                "pane_index": ds_copy.get("pane_index"),
+                "columns": ds_copy.get("column_map", {}),
+                "style": ds_copy.get("style", {}),
+                "data_source": ds_data_source,
+                "prepared_data": prep_info,
+            }
+        )
+
+    plot_cfg["datasets"] = prepared_datasets
+    primary_dataset = prepared_datasets[0]
+    data_prep = primary_dataset.get("prepared_data", {})
+    plot_cfg["datafile"] = primary_dataset["datafile"]
+    plot_cfg["data_source"] = primary_dataset.get(
+        "data_source", plot_cfg.get("data_source", {})
+    )
+    plot_cfg["column_map"] = primary_dataset.get(
+        "column_map", plot_cfg.get("column_map", {})
+    )
 
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
@@ -645,11 +1008,19 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
         "output_plot": out_plot,
         "residuals_plot": residuals_path,
         "data_source": {
-            "path": plot_cfg.get("data_source", {}).get("path", plot_cfg["datafile"]),
+            "path": os.path.abspath(
+                plot_cfg.get("data_source", {}).get("path", plot_cfg["datafile"])
+            ).replace("\\", "/"),
             "columns": column_map,
             "rows_before": data_prep.get("rows_before"),
             "rows_after": data_prep.get("rows_after"),
             "preprocessing": data_prep.get("applied_steps", []),
+        },
+        "layout": plot_cfg.get("layout", {}),
+        "datasets": datasets_report,
+        "canvases": {
+            "combined": out_plot,
+            "residuals": residuals_path,
         },
         "confidence_notes": confidence_notes,
         "geometry": geometry_info,
