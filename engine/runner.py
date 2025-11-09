@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict
 from reports.markdown_builder import write_markdown_report
 from reports.pdf_exporter import export_pdf
 
-from config import ConfigError, load_config_file
+from config import ConfigError, JobSettings, load_config_file
 from .config import normalize_plots
 from .data_pipeline import prepare_datafile
 from .script_builder import (
@@ -250,8 +250,9 @@ def run_job(
     config: dict,
     *,
     config_path: str = "config.json",
-    max_workers: int = 4,
-    output_dir: str | None = None,
+    settings: JobSettings | None = None,
+    max_workers: int | None = None,
+    output_dir: str | os.PathLike[str] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute a batch fit job from an in-memory config definition."""
@@ -261,15 +262,30 @@ def run_job(
         plots = normalize_plots(config, config_path)
 
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        base_output = output_dir or os.path.abspath(os.path.join("outputs", ts))
+
+        job_settings = settings
+        if output_dir is not None:
+            base_output = os.fspath(output_dir)
+        elif job_settings and job_settings.output_dir is not None:
+            base_output = os.fspath(job_settings.output_dir)
+        else:
+            base_output = os.path.abspath(os.path.join("outputs", ts))
         os.makedirs(base_output, exist_ok=True)
+
+        worker_count: int
+        if max_workers is not None:
+            worker_count = int(max_workers)
+        elif job_settings and job_settings.max_workers is not None:
+            worker_count = int(job_settings.max_workers)
+        else:
+            worker_count = 4
 
         dispatcher.emit("job-start", timestamp=ts, total=len(plots), output_dir=base_output)
 
         results: list[dict[str, Any]] = []
         futures: dict[Any, dict] = {}
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for plot_cfg in plots:
                 futures[executor.submit(process_plot, plot_cfg, base_output, dispatcher)] = plot_cfg
 
@@ -344,7 +360,8 @@ def run_job(
 def run_batch(
     config_path: str,
     *,
-    max_workers: int = 4,
+    max_workers: int | None = None,
+    output_dir: str | os.PathLike[str] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     try:
@@ -358,16 +375,10 @@ def run_batch(
     except json.JSONDecodeError:
         config_payload = job.to_dict()
 
-    if job.settings.max_workers:
-        max_workers = job.settings.max_workers
-
-    output_dir: str | None = None
-    if job.settings.output_dir:
-        output_dir = str(job.settings.output_dir)
-
     return run_job(
         config_payload,
         config_path=config_path,
+        settings=job.settings,
         max_workers=max_workers,
         output_dir=output_dir,
         on_event=on_event,
