@@ -25,6 +25,59 @@ BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
 # ---------- helpers ----------
 
 
+def _coerce_positive_int(value, default: int) -> int:
+    try:
+        ivalue = int(value)
+    except (TypeError, ValueError):
+        return default
+    return ivalue if ivalue > 0 else default
+
+
+def _coerce_bool(value, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
+def _normalize_layout(raw_layout: dict | None) -> dict:
+    if not isinstance(raw_layout, dict):
+        raw_layout = {}
+
+    rows = _coerce_positive_int(raw_layout.get("rows"), 1)
+    columns = _coerce_positive_int(raw_layout.get("columns"), 1)
+    shared_x = _coerce_bool(raw_layout.get("shared_x"), False)
+    shared_y = _coerce_bool(raw_layout.get("shared_y"), False)
+    show_legend = _coerce_bool(raw_layout.get("show_legend"), True)
+
+    legend_position = raw_layout.get("legend_position")
+    if isinstance(legend_position, str):
+        legend_position = legend_position.strip()
+    else:
+        legend_position = ""
+
+    layout = {
+        "rows": rows,
+        "columns": columns,
+        "shared_x": shared_x,
+        "shared_y": shared_y,
+        "show_legend": show_legend,
+    }
+
+    if legend_position:
+        layout["legend_position"] = legend_position
+
+    return layout
+
+
 def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
     """Run a gnuplot script inside *workdir* and return combined stdout/stderr."""
 
@@ -354,6 +407,108 @@ def infer_parameters(formula: str) -> list[str]:
     return params
 
 
+def _normalize_dataset_entry(
+    dataset: dict,
+    *,
+    base_dir: str,
+    default_style: StyleConfig,
+    fit_title: str,
+    dataset_index: int,
+) -> dict:
+    if not isinstance(dataset, dict):
+        raise ValueError(
+            f"Dataset #{dataset_index} for fit '{fit_title}' must be an object"
+        )
+
+    raw_data_source = dataset.get("data_source")
+    raw_source = raw_data_source if isinstance(raw_data_source, dict) else {}
+    data_path = (
+        raw_source.get("path")
+        or dataset.get("path")
+        or (dataset.get("datafile") if isinstance(dataset.get("datafile"), str) else "")
+    )
+    if not data_path:
+        raise FileNotFoundError(
+            f"Data file not specified for dataset #{dataset_index} in fit '{fit_title}'"
+        )
+    if not os.path.isabs(data_path):
+        data_path = os.path.abspath(os.path.join(base_dir, data_path))
+    if not os.path.exists(data_path):
+        raise FileNotFoundError(
+            f"Data file not found for dataset #{dataset_index} in fit '{fit_title}': {data_path}"
+        )
+
+    raw_columns = raw_source.get("columns") if isinstance(raw_source, dict) else None
+    if raw_columns is None:
+        raw_columns = dataset.get("columns")
+    columns = _ensure_columns_dict(raw_columns)
+    _validate_columns_exist(data_path, columns)
+
+    raw_preprocessing = raw_source.get("preprocessing") if isinstance(raw_source, dict) else None
+    if raw_preprocessing is None:
+        raw_preprocessing = dataset.get("preprocessing")
+    preprocessing = _normalize_preprocessing(raw_preprocessing)
+
+    style_model = copy.deepcopy(default_style)
+    raw_style = dataset.get("style")
+    style_overrides = raw_style if isinstance(raw_style, dict) else {}
+    dataset_color = dataset.get("color")
+    if style_overrides:
+        override_cfg = StyleConfig.from_dict(
+            style_overrides,
+            fallback_color=dataset_color or style_model.line_color,
+        )
+        for field in style_overrides.keys():
+            if field in style_model.__dataclass_fields__:
+                setattr(style_model, field, getattr(override_cfg, field))
+    if dataset_color:
+        style_model.line_color = dataset_color
+
+    label = (
+        dataset.get("label")
+        or dataset.get("title")
+        or dataset.get("name")
+        or f"Dataset {dataset_index}"
+    )
+
+    pane = dataset.get("pane")
+    if isinstance(pane, str):
+        pane = pane.strip()
+    elif pane is not None and not isinstance(pane, (int, float)):
+        pane = str(pane)
+
+    pane_index = dataset.get("pane_index")
+    if pane_index is not None:
+        try:
+            pane_index = int(pane_index)
+        except (TypeError, ValueError):
+            pane_index = None
+        else:
+            if pane_index <= 0:
+                pane_index = None
+
+    dataset_info = {
+        "label": label,
+        "datafile": data_path,
+        "column_map": columns,
+        "error_bars": bool(columns.get("error")),
+        "style": style_model.to_dict(),
+        "style_model": style_model,
+        "data_source": {
+            "path": data_path,
+            "columns": columns,
+            "preprocessing": preprocessing,
+        },
+    }
+
+    if pane not in {None, ""}:
+        dataset_info["pane"] = pane
+    if pane_index is not None:
+        dataset_info["pane_index"] = pane_index
+
+    return dataset_info
+
+
 def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
     if isinstance(cfg.get("plots"), list):
         return cfg["plots"]
@@ -371,24 +526,6 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
         if not params:
             raise ValueError(f"Cannot infer parameters for formula '{formula}'")
 
-        data_source = fit.get("data_source") if isinstance(fit.get("data_source"), dict) else {}
-        data_path = data_source.get("path") or fit.get("datafile") or ""
-        if not data_path:
-            raise FileNotFoundError(
-                f"Data file not specified for fit '{fit.get('title', 'Untitled')}'"
-            )
-        if not os.path.isabs(data_path):
-            data_path = os.path.abspath(os.path.join(base_dir, data_path))
-        if not os.path.exists(data_path):
-            raise FileNotFoundError(
-                f"Data file not found for fit '{fit.get('title', 'Untitled')}': {data_path}"
-            )
-
-        columns = _ensure_columns_dict(data_source.get("columns"))
-        _validate_columns_exist(data_path, columns)
-
-        preprocessing = _normalize_preprocessing(data_source.get("preprocessing"))
-
         style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
         if fit.get("color"):
             style_cfg.line_color = fit["color"]
@@ -396,6 +533,44 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
             fit["color"] = style_cfg.line_color
         style = style_cfg.to_dict()
 
+        layout = _normalize_layout(fit.get("layout"))
+
+        datasets_cfg = fit.get("datasets") if isinstance(fit.get("datasets"), list) else []
+        datasets: list[dict] = []
+        if datasets_cfg:
+            for idx, dataset_cfg in enumerate(datasets_cfg, start=1):
+                datasets.append(
+                    _normalize_dataset_entry(
+                        dataset_cfg,
+                        base_dir=base_dir,
+                        default_style=style_cfg,
+                        fit_title=fit.get("title", "Untitled"),
+                        dataset_index=idx,
+                    )
+                )
+        else:
+            data_source = fit.get("data_source") if isinstance(fit.get("data_source"), dict) else {}
+            fallback_dataset = copy.deepcopy(data_source)
+            if not isinstance(fallback_dataset, dict):
+                fallback_dataset = {}
+            if fit.get("datafile") and not fallback_dataset.get("path"):
+                fallback_dataset["path"] = fit.get("datafile")
+            datasets.append(
+                _normalize_dataset_entry(
+                    {"label": fit.get("title", "Untitled"), "data_source": fallback_dataset},
+                    base_dir=base_dir,
+                    default_style=style_cfg,
+                    fit_title=fit.get("title", "Untitled"),
+                    dataset_index=1,
+                )
+            )
+
+        if not datasets:
+            raise ValueError(
+                f"Fit '{fit.get('title', 'Untitled')}' must define at least one dataset"
+            )
+
+        primary_dataset = datasets[0]
         initial_params = {}
         for key in params:
             try:
@@ -407,19 +582,17 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
             {
                 "title": fit.get("title", "Untitled"),
                 "fit_formula": formula,
-                "datafile": data_path,
+                "datafile": primary_dataset["datafile"],
                 "residuals": bool(fit.get("residuals", True)),
                 "style": style,
                 "style_model": style_cfg,
                 "fit_params": params,
                 "initial_params": initial_params,
-                "column_map": columns,
-                "error_bars": bool(columns.get("error")),
-                "data_source": {
-                    "path": data_path,
-                    "columns": columns,
-                    "preprocessing": preprocessing,
-                },
+                "column_map": primary_dataset["column_map"],
+                "error_bars": primary_dataset["error_bars"],
+                "data_source": primary_dataset["data_source"],
+                "datasets": datasets,
+                "layout": layout,
             }
         )
 

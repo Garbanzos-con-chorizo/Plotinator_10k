@@ -5,24 +5,62 @@
             "formula": "a*x + b",
             "residuals": true,
             "color": "blue",
-            "data_source": {
-                "path": "data/sample1.dat",
-                "columns": {"x": 1, "y": 2, "error": 3},
-                "preprocessing": []
-            }
+            "layout": {
+                "rows": 1,
+                "columns": 2,
+                "shared_x": true,
+                "shared_y": false,
+                "show_legend": true
+            },
+            "datasets": [
+                {
+                    "label": "Sample 1 (raw)",
+                    "pane_index": 1,
+                    "data_source": {
+                        "path": "data/sample1.dat",
+                        "columns": {"x": 1, "y": 2, "error": 3},
+                        "preprocessing": []
+                    }
+                },
+                {
+                    "label": "Sample 1 (filtered)",
+                    "pane_index": 2,
+                    "style": {"line_color": "#ff7f0e"},
+                    "data_source": {
+                        "path": "data/sample1.dat",
+                        "columns": {"x": 1, "y": 2},
+                        "preprocessing": [
+                            {"type": "filter", "expression": "col2 > 0"}
+                        ]
+                    }
+                }
+            ]
         },
         {
             "title": "Exponential Fit Example",
             "formula": "A * exp(B * x)",
             "residuals": false,
             "color": "red",
-            "data_source": {
-                "path": "data/sample2.dat",
-                "columns": {"x": 1, "y": 2, "weight": 4},
-                "preprocessing": [
-                    {"type": "filter", "expression": "col2 > 0"}
-                ]
-            }
+            "layout": {
+                "rows": 2,
+                "columns": 1,
+                "shared_x": false,
+                "shared_y": true,
+                "show_legend": false
+            },
+            "datasets": [
+                {
+                    "label": "Growth Curve",
+                    "pane": "upper",
+                    "data_source": {
+                        "path": "data/sample2.dat",
+                        "columns": {"x": 1, "y": 2, "weight": 4},
+                        "preprocessing": [
+                            {"type": "filter", "expression": "col2 > 0"}
+                        ]
+                    }
+                }
+            ]
         },
         {
             "title": "New Fit",
