@@ -663,11 +663,34 @@ class DatasetDialog(ttkb.Toplevel):
             self.show_toast(f"Plot failed: {title}", level="error")
             return
 
+        if etype == "report-markdown-ready":
+            md_path = event.get("markdown_path", "")
+            if md_path:
+                self._append_log(f"[REPORT] Markdown saved to: {md_path}\n")
+            return
+
+        if etype == "report-exported":
+            pdf_path = event.get("pdf_path", "")
+            if pdf_path:
+                self._append_log(f"[REPORT] PDF exported to: {pdf_path}\n")
+            self.show_toast("Report exported", level="success")
+            return
+
+        if etype == "report-error":
+            stage = event.get("stage", "report")
+            error_msg = event.get("error", "Unknown error")
+            self._append_log(f"[WARN] Report {stage} failed: {error_msg}\n")
+            self.show_toast("Report generation issue", level="warning")
+            return
+
         if etype == "job-complete":
             self.progress.configure(value=100)
             results_path = event.get("results_path")
             if results_path:
                 self._append_log(f"\n[COMPLETE] Results saved to: {results_path}\n")
+            pdf_path = event.get("pdf_path")
+            if pdf_path:
+                self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
             return
 
@@ -709,8 +732,16 @@ class DatasetDialog(ttkb.Toplevel):
         if not latest:
             messagebox.showinfo("No report", "Generate a batch before opening a report.")
             return
+        latest_dir = latest.parent
+        pdf_report = latest_dir / "report.pdf"
+        md_report = latest_dir / "report.md"
         webbrowser = __import__("webbrowser")
-        webbrowser.open(latest.parent.as_uri())
+        if pdf_report.exists():
+            webbrowser.open(pdf_report.as_uri())
+        elif md_report.exists():
+            webbrowser.open(md_report.as_uri())
+        else:
+            webbrowser.open(latest_dir.as_uri())
 
     # ------------------------------------------------------------------
     def show_toast(self, message: str, level: str = "info") -> None:
