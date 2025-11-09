@@ -142,6 +142,186 @@ def generate_gnuplot_code(
     err_col = column_map.get("error")
     weight_col = column_map.get("weight")
     use_err = bool(err_col)
+import numpy as np
+
+from plotinator.config.style import StyleConfig
+
+PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
+                      re.MULTILINE)
+
+
+# ---------- helpers ----------
+
+def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
+    """
+    Write a temp gnuplot file into workdir (UTF-8), run it there, and
+    return combined stdout+stderr. Also write full output to log.txt.
+    """
+    script_path = os.path.join(workdir, "temp_plot.plt")
+    with open(script_path, "w", encoding="utf-8") as f:
+        f.write(gnuplot_code)
+
+    result = subprocess.run(
+        ["gnuplot", script_path],
+        cwd=workdir,
+        capture_output=True,
+        text=True,
+        encoding="utf-8"
+    )
+    output = (result.stdout or "") + (result.stderr or "")
+
+    # keep a log for debugging
+    with open(os.path.join(workdir, "log.txt"), "w", encoding="utf-8") as lf:
+        lf.write(output)
+
+    return output
+
+def parse_fit_output(output_text: str) -> dict:
+    params = {}
+    for name, val, err in PYFIT_RE.findall(output_text):
+        params[name] = {"value": float(val), "error": float(err)}
+    return params
+
+def compute_residual_metrics(datafile: str, params: dict, formula: str) -> dict:
+    """
+    Compute residual statistics (mean, std, RMSE) directly from data and fit parameters.
+    """
+    import re
+    import numpy as np
+
+    # Build f(x) safely
+    # Replace parameter names with their fitted values
+    expr = formula
+    for name, values in params.items():
+        expr = re.sub(rf'\b{name}\b', str(values["value"]), expr)
+
+    # Load data (x, y[, dy])
+    data = np.loadtxt(datafile, usecols=(0, 1))
+    x, y = data[:, 0], data[:, 1]
+
+    # Evaluate fitted curve
+    f = np.vectorize(lambda xx: eval(expr, {"x": xx, "math": math, "np": np}))
+    yfit = f(x)
+    residuals = y - yfit
+
+    mean = float(np.mean(residuals))
+    std = float(np.std(residuals))
+    rmse = float(np.sqrt(np.mean(residuals**2)))
+
+    return {"mean": mean, "std": std, "rmse": rmse}
+
+def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> dict:
+    """
+    Generic, model-agnostic initializer.
+    Uses data magnitude and parameter index to pick stable, nonzero guesses.
+    Compatible with NumPy ≥2.0 (uses np.ptp instead of ndarray.ptp).
+    """
+    import numpy as np
+
+    arr = np.loadtxt(datafile, usecols=(0, 1))
+    if arr.ndim == 1:
+        arr = arr.reshape(-1, 2)
+    x, y = arr[:, 0], arr[:, 1]
+
+    # Magnitude scale (fallback to 1.0)
+    y_abs = np.abs(y)
+    scale = float(max(
+        y_abs.mean() if y_abs.size else 0.0,
+        np.ptp(y_abs) if y_abs.size else 0.0,
+        1.0
+    ))
+
+    # Absolute floor to avoid zeros / tiny values
+    floor_eps = max(1e-3, scale * 1e-6)
+
+    guesses = {}
+    # Distinct, nonzero guesses spaced across a reasonable range
+    for i, p in enumerate(params, start=1):
+        val = 0.5 * i * scale
+        if abs(val) < floor_eps:
+            val = floor_eps
+        guesses[p] = float(val)
+
+    # Final pass: ensure nothing zero/NaN/inf and no two identical guesses
+    seen = set()
+    bump = floor_eps
+    for k in list(guesses.keys()):
+        v = guesses[k]
+        if not (np.isfinite(v) and abs(v) >= floor_eps):
+            v = floor_eps
+        while v in seen:
+            v += bump
+        seen.add(v)
+        guesses[k] = v
+
+    return guesses
+
+
+def generate_gnuplot_code(
+    cfg: dict, out_plot: str | None, out_residuals: str | None = None
+) -> str:
+    raw_style = cfg.get("style_model") or cfg.get("style")
+    style_cfg = (
+        raw_style
+        if isinstance(raw_style, StyleConfig)
+        else StyleConfig.from_dict(raw_style, fallback_color=cfg.get("color"))
+    )
+
+    pt = style_cfg.point_type
+    lw = style_cfg.line_width
+    col = style_cfg.line_color
+
+    formula = cfg["fit_formula"]
+    params = cfg["fit_params"]
+    params_csv = ",".join(params)
+    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
+    use_err = cfg.get("error_bars", False)
+
+    def _escape(text: str) -> str:
+        return (text or "").replace("\\", "\\\\").replace('"', '\"')
+
+    def _style_commands(title: str, x_label: str, y_label: str, *, force_linear_y: bool = False) -> str:
+        lines: list[str] = [
+            "set encoding utf8",
+            f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\"",
+            f"set title \"{_escape(title)}\" font \",{style_cfg.title_font_size}\"",
+            f"set xlabel \"{_escape(x_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set ylabel \"{_escape(y_label)}\" font \",{style_cfg.axis_label_font_size}\"",
+            f"set xtics font \",{style_cfg.tick_font_size}\"",
+            f"set ytics font \",{style_cfg.tick_font_size}\"",
+        ]
+
+        if style_cfg.x_scale == "log":
+            lines.append("set logscale x")
+        else:
+            lines.append("unset logscale x")
+
+        if not force_linear_y and style_cfg.y_scale == "log":
+            lines.append("set logscale y")
+        else:
+            lines.append("unset logscale y")
+
+        if style_cfg.x_tick_format:
+            lines.append(f"set format x \"{_escape(style_cfg.x_tick_format)}\"")
+        else:
+            lines.append("set format x")
+
+        if style_cfg.y_tick_format and not force_linear_y:
+            lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
+        else:
+            lines.append("set format y")
+
+        if style_cfg.grid:
+            lines.append(f"set grid {style_cfg.grid_layer}")
+        else:
+            lines.append("unset grid")
+
+        if style_cfg.legend_visible and not force_linear_y:
+            lines.append(style_cfg.legend_gnuplot_clause())
+        else:
+            lines.append("unset key")
+
+        return "\n".join(lines)
 
     # Compute smart initial guesses
     guesses = estimate_initial_params(datafile, formula, params)
@@ -159,22 +339,14 @@ def generate_gnuplot_code(
     ])
 
 
-    using_terms = [str(x_col), str(y_col)] + ([str(err_col)] if err_col else [])
-    using_clause = ":".join(using_terms)
-    weight_clause = f" weights column {weight_col}" if weight_col else ""
-
     code = f"""
-set encoding utf8
-set terminal pngcairo size 800,600
-set title "{cfg['title']}"
-set xlabel "X"
-set ylabel "Y"
+{_style_commands(cfg['title'], style_cfg.axis_label_with_unit('x'), style_cfg.axis_label_with_unit('y'))}
 
 set fit errorvariables
 {init_lines}
 
 f(x) = {formula}
-fit f(x) "{datafile}" using {using_clause}{weight_clause} via {params_csv}
+fit f(x) "{datafile}" via {params_csv}
 
 {prints}
 
@@ -196,14 +368,10 @@ fit f(x) "{datafile}" using {using_clause}{weight_clause} via {params_csv}
 
     # Optional residuals
     if out_residuals:
-        residual_using = f"{x_col}:(\${y_col} - f(\${x_col}))"
         code += f"""
 set output "{out_residuals}"
-set title "Residuals — {cfg['title']}"
-set xlabel "X"
-set ylabel "Residual (y - f(x))"
-set grid back
-plot "{datafile}" using {residual_using} with points pt {pt} title "Residuals", \\ 
+{_style_commands(f"Residuals — {cfg['title']}", style_cfg.axis_label_with_unit('x'), "Residual (y - f(x))", force_linear_y=True)}
+plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
      0 with lines notitle lc rgb "gray"
 unset output
 """
@@ -332,11 +500,12 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
 
         preprocessing = _normalize_preprocessing(data_source.get("preprocessing"))
 
-        style = fit.get("style", {}).copy()
-        if "color" in fit and fit["color"]:
-            style.setdefault("line_color", fit["color"])
-        elif "line_color" not in style:
-            style["line_color"] = "#1f77b4"
+        style_cfg = StyleConfig.from_dict(fit.get("style"), fallback_color=fit.get("color"))
+        if fit.get("color"):
+            style_cfg.line_color = fit["color"]
+        else:
+            fit["color"] = style_cfg.line_color
+        style = style_cfg.to_dict()
 
         initial_params = {}
         for key in params:
@@ -352,6 +521,7 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
                 "datafile": data_path,
                 "residuals": bool(fit.get("residuals", True)),
                 "style": style,
+                "style_model": style_cfg,
                 "fit_params": params,
                 "initial_params": initial_params,
                 "column_map": columns,
