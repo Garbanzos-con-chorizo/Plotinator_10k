@@ -1,162 +1,33 @@
-import subprocess
-import datetime
-import sys, os
-import json
-import re
-import math
+from __future__ import annotations
+
 import copy
-import numpy as np
+import datetime
+import json
+import math
+import os
+import re
+import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
-                      re.MULTILINE)
-
-
-# ---------- helpers ----------
-
-def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
-    """
-    Write a temp gnuplot file into workdir (UTF-8), run it there, and
-    return combined stdout+stderr. Also write full output to log.txt.
-    """
-    script_path = os.path.join(workdir, "temp_plot.plt")
-    with open(script_path, "w", encoding="utf-8") as f:
-        f.write(gnuplot_code)
-
-    result = subprocess.run(
-        ["gnuplot", script_path],
-        cwd=workdir,
-        capture_output=True,
-        text=True,
-        encoding="utf-8"
-    )
-    output = (result.stdout or "") + (result.stderr or "")
-
-    # keep a log for debugging
-    with open(os.path.join(workdir, "log.txt"), "w", encoding="utf-8") as lf:
-        lf.write(output)
-
-    return output
-
-def parse_fit_output(output_text: str) -> dict:
-    params = {}
-    for name, val, err in PYFIT_RE.findall(output_text):
-        params[name] = {"value": float(val), "error": float(err)}
-    return params
-
-def compute_residual_metrics(
-    datafile: str, column_map: dict, params: dict, formula: str
-) -> dict:
-    """
-    Compute residual statistics (mean, std, RMSE) directly from data and fit parameters.
-    """
-    import re
-    import numpy as np
-
-    # Build f(x) safely
-    # Replace parameter names with their fitted values
-    expr = formula
-    for name, values in params.items():
-        expr = re.sub(rf'\b{name}\b', str(values["value"]), expr)
-
-    # Load data (x, y[, dy])
-    x_idx = column_map.get("x", 1) - 1
-    y_idx = column_map.get("y", 2) - 1
-    data = np.loadtxt(datafile, usecols=(x_idx, y_idx))
-    if data.ndim == 1:
-        data = data.reshape(-1, 2)
-    x, y = data[:, 0], data[:, 1]
-
-    # Evaluate fitted curve
-    f = np.vectorize(lambda xx: eval(expr, {"x": xx, "math": math, "np": np}))
-    yfit = f(x)
-    residuals = y - yfit
-
-    mean = float(np.mean(residuals))
-    std = float(np.std(residuals))
-    rmse = float(np.sqrt(np.mean(residuals**2)))
-
-    return {"mean": mean, "std": std, "rmse": rmse}
-
-def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> dict:
-    """
-    Generic, model-agnostic initializer.
-    Uses data magnitude and parameter index to pick stable, nonzero guesses.
-    Compatible with NumPy ≥2.0 (uses np.ptp instead of ndarray.ptp).
-    """
-    import numpy as np
-
-    arr = np.loadtxt(datafile, usecols=(0, 1))
-    if arr.ndim == 1:
-        arr = arr.reshape(-1, 2)
-    x, y = arr[:, 0], arr[:, 1]
-
-    # Magnitude scale (fallback to 1.0)
-    y_abs = np.abs(y)
-    scale = float(max(
-        y_abs.mean() if y_abs.size else 0.0,
-        np.ptp(y_abs) if y_abs.size else 0.0,
-        1.0
-    ))
-
-    # Absolute floor to avoid zeros / tiny values
-    floor_eps = max(1e-3, scale * 1e-6)
-
-    guesses = {}
-    # Distinct, nonzero guesses spaced across a reasonable range
-    for i, p in enumerate(params, start=1):
-        val = 0.5 * i * scale
-        if abs(val) < floor_eps:
-            val = floor_eps
-        guesses[p] = float(val)
-
-    # Final pass: ensure nothing zero/NaN/inf and no two identical guesses
-    seen = set()
-    bump = floor_eps
-    for k in list(guesses.keys()):
-        v = guesses[k]
-        if not (np.isfinite(v) and abs(v) >= floor_eps):
-            v = floor_eps
-        while v in seen:
-            v += bump
-        seen.add(v)
-        guesses[k] = v
-
-    return guesses
-
-
-def generate_gnuplot_code(
-    cfg: dict, out_plot: str | None, out_residuals: str | None = None
-) -> str:
-    style = cfg.get("style", {})
-    pt  = style.get("point_type", 7)
-    lw  = style.get("line_width", 2)
-    col = style.get("line_color", "black")
-
-    formula  = cfg["fit_formula"]
-    params   = cfg["fit_params"]
-    params_csv = ",".join(params)
-    datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
-    column_map = cfg.get("column_map", {})
-    x_col = column_map.get("x", 1)
-    y_col = column_map.get("y", 2)
-    err_col = column_map.get("error")
-    weight_col = column_map.get("weight")
-    use_err = bool(err_col)
 import numpy as np
 
 from plotinator.config.style import StyleConfig
 
-PYFIT_RE = re.compile(r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
-                      re.MULTILINE)
+
+PYFIT_RE = re.compile(
+    r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
+    re.MULTILINE,
+)
+BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
 
 
 # ---------- helpers ----------
 
+
 def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
-    """
-    Write a temp gnuplot file into workdir (UTF-8), run it there, and
-    return combined stdout+stderr. Also write full output to log.txt.
-    """
+    """Run a gnuplot script inside *workdir* and return combined stdout/stderr."""
+
     script_path = os.path.join(workdir, "temp_plot.plt")
     with open(script_path, "w", encoding="utf-8") as f:
         f.write(gnuplot_code)
@@ -166,15 +37,15 @@ def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
         cwd=workdir,
         capture_output=True,
         text=True,
-        encoding="utf-8"
+        encoding="utf-8",
     )
     output = (result.stdout or "") + (result.stderr or "")
 
-    # keep a log for debugging
     with open(os.path.join(workdir, "log.txt"), "w", encoding="utf-8") as lf:
         lf.write(output)
 
     return output
+
 
 def parse_fit_output(output_text: str) -> dict:
     params = {}
@@ -182,24 +53,23 @@ def parse_fit_output(output_text: str) -> dict:
         params[name] = {"value": float(val), "error": float(err)}
     return params
 
-def compute_residual_metrics(datafile: str, params: dict, formula: str) -> dict:
-    """
-    Compute residual statistics (mean, std, RMSE) directly from data and fit parameters.
-    """
-    import re
-    import numpy as np
 
-    # Build f(x) safely
-    # Replace parameter names with their fitted values
+def compute_residual_metrics(
+    datafile: str, column_map: dict, params: dict, formula: str
+) -> dict:
+    """Compute residual statistics (mean, std, RMSE) for the fitted curve."""
+
     expr = formula
     for name, values in params.items():
-        expr = re.sub(rf'\b{name}\b', str(values["value"]), expr)
+        expr = re.sub(rf"\\b{name}\\b", str(values["value"]), expr)
 
-    # Load data (x, y[, dy])
-    data = np.loadtxt(datafile, usecols=(0, 1))
+    x_col = int(column_map.get("x", 1)) - 1
+    y_col = int(column_map.get("y", 2)) - 1
+    data = np.loadtxt(datafile, usecols=(x_col, y_col))
+    if data.ndim == 1:
+        data = data.reshape(-1, 2)
     x, y = data[:, 0], data[:, 1]
 
-    # Evaluate fitted curve
     f = np.vectorize(lambda xx: eval(expr, {"x": xx, "math": math, "np": np}))
     yfit = f(x)
     residuals = y - yfit
@@ -210,51 +80,54 @@ def compute_residual_metrics(datafile: str, params: dict, formula: str) -> dict:
 
     return {"mean": mean, "std": std, "rmse": rmse}
 
-def estimate_initial_params(datafile: str, formula: str, params: list[str]) -> dict:
-    """
-    Generic, model-agnostic initializer.
-    Uses data magnitude and parameter index to pick stable, nonzero guesses.
-    Compatible with NumPy ≥2.0 (uses np.ptp instead of ndarray.ptp).
-    """
-    import numpy as np
 
-    arr = np.loadtxt(datafile, usecols=(0, 1))
+def estimate_initial_params(
+    datafile: str, params: list[str], column_map: dict | None = None
+) -> dict:
+    """Return stable, non-zero initial guesses for fit parameters."""
+
+    column_map = column_map or {}
+    x_idx = int(column_map.get("x", 1)) - 1
+    y_idx = int(column_map.get("y", 2)) - 1
+    arr = np.loadtxt(datafile, usecols=(x_idx, y_idx))
     if arr.ndim == 1:
         arr = arr.reshape(-1, 2)
-    x, y = arr[:, 0], arr[:, 1]
+    y = arr[:, 1]
 
-    # Magnitude scale (fallback to 1.0)
     y_abs = np.abs(y)
-    scale = float(max(
-        y_abs.mean() if y_abs.size else 0.0,
-        np.ptp(y_abs) if y_abs.size else 0.0,
-        1.0
-    ))
+    scale = float(
+        max(
+            y_abs.mean() if y_abs.size else 0.0,
+            np.ptp(y_abs) if y_abs.size else 0.0,
+            1.0,
+        )
+    )
 
-    # Absolute floor to avoid zeros / tiny values
     floor_eps = max(1e-3, scale * 1e-6)
 
-    guesses = {}
-    # Distinct, nonzero guesses spaced across a reasonable range
-    for i, p in enumerate(params, start=1):
+    guesses: dict[str, float] = {}
+    for i, param in enumerate(params, start=1):
         val = 0.5 * i * scale
         if abs(val) < floor_eps:
             val = floor_eps
-        guesses[p] = float(val)
+        guesses[param] = float(val)
 
-    # Final pass: ensure nothing zero/NaN/inf and no two identical guesses
-    seen = set()
+    seen: set[float] = set()
     bump = floor_eps
-    for k in list(guesses.keys()):
-        v = guesses[k]
-        if not (np.isfinite(v) and abs(v) >= floor_eps):
-            v = floor_eps
-        while v in seen:
-            v += bump
-        seen.add(v)
-        guesses[k] = v
+    for key in list(guesses.keys()):
+        value = guesses[key]
+        if not (np.isfinite(value) and abs(value) >= floor_eps):
+            value = floor_eps
+        while value in seen:
+            value += bump
+        seen.add(value)
+        guesses[key] = value
 
     return guesses
+
+
+def _escape(text: str) -> str:
+    return (text or "").replace("\\", "\\\\").replace('"', '\"')
 
 
 def generate_gnuplot_code(
@@ -275,12 +148,16 @@ def generate_gnuplot_code(
     params = cfg["fit_params"]
     params_csv = ",".join(params)
     datafile = os.path.abspath(cfg["datafile"]).replace("\\", "/")
-    use_err = cfg.get("error_bars", False)
+    column_map = cfg.get("column_map", {})
+    x_col = column_map.get("x", 1)
+    y_col = column_map.get("y", 2)
+    err_col = column_map.get("error")
+    weight_col = column_map.get("weight")
+    use_err = bool(err_col)
 
-    def _escape(text: str) -> str:
-        return (text or "").replace("\\", "\\\\").replace('"', '\"')
-
-    def _style_commands(title: str, x_label: str, y_label: str, *, force_linear_y: bool = False) -> str:
+    def _style_commands(
+        title: str, x_label: str, y_label: str, *, force_linear_y: bool = False
+    ) -> str:
         lines: list[str] = [
             "set encoding utf8",
             f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\"",
@@ -323,21 +200,34 @@ def generate_gnuplot_code(
 
         return "\n".join(lines)
 
-    # Compute smart initial guesses
-    guesses = estimate_initial_params(datafile, formula, params)
+    guesses = estimate_initial_params(datafile, params, column_map)
     overrides = cfg.get("initial_params") or {}
     for key, value in overrides.items():
-        if key in guesses:
-            guesses[key] = value
+        if key in guesses and isinstance(value, (int, float)):
+            guesses[key] = float(value)
     init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
-    prints = "\n".join([
-       f'if (exists("{p}_err")) {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
-       f'}} else {{ '
-       f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
-       for p in params
-    ])
+    prints = "\n".join(
+        [
+            (
+                f'if (exists("{p}_err")) {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) }} '
+                f'else {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
+            )
+            for p in params
+        ]
+    )
 
+    fit_using: list[str] = []
+    if x_col != 1 or y_col != 2 or err_col or weight_col:
+        fit_using.extend([str(x_col), str(y_col)])
+        if err_col:
+            fit_using.append(str(err_col))
+        elif weight_col:
+            fit_using.append(str(weight_col))
+
+    fit_clause = f'fit f(x) "{datafile}"'
+    if fit_using:
+        fit_clause += f" using {':'.join(fit_using)}"
+    fit_clause += f" via {params_csv}"
 
     code = f"""
 {_style_commands(cfg['title'], style_cfg.axis_label_with_unit('x'), style_cfg.axis_label_with_unit('y'))}
@@ -346,14 +236,17 @@ set fit errorvariables
 {init_lines}
 
 f(x) = {formula}
-fit f(x) "{datafile}" via {params_csv}
+{fit_clause}
 
 {prints}
 
 """
     if out_plot:
         code += f"set output \"{out_plot}\"\n"
-        data_using = ":".join([str(x_col), str(y_col)] + ([str(err_col)] if err_col else []))
+        data_cols = [str(x_col), str(y_col)]
+        if err_col:
+            data_cols.append(str(err_col))
+        data_using = ":".join(data_cols)
         if use_err:
             code += (
                 f"plot \"{datafile}\" using {data_using} with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
@@ -366,19 +259,15 @@ fit f(x) "{datafile}" via {params_csv}
             )
         code += "unset output\n"
 
-    # Optional residuals
     if out_residuals:
         code += f"""
 set output "{out_residuals}"
 {_style_commands(f"Residuals — {cfg['title']}", style_cfg.axis_label_with_unit('x'), "Residual (y - f(x))", force_linear_y=True)}
-plot "{datafile}" using 1:($2 - f($1)) with points pt {pt} title "Residuals", \\
+plot "{datafile}" using {x_col}:(column({y_col}) - f(column({x_col}))) with points pt {pt} title "Residuals", \\
      0 with lines notitle lc rgb "gray"
 unset output
 """
     return code
-
-
-BLACKLIST = {"x", "sin", "cos", "tan", "exp", "log", "sqrt", "np", "math"}
 
 
 def _ensure_columns_dict(columns: dict | None) -> dict:
@@ -539,8 +428,6 @@ def normalize_plots(cfg: dict, config_path: str) -> list[dict]:
 
 # ---------- main ----------
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 
 def _load_data_matrix(path: str) -> np.ndarray:
     data = np.loadtxt(path, ndmin=2)
@@ -649,9 +536,9 @@ def prepare_datafile(plot_cfg: dict, plot_dir: str) -> dict:
         "applied_steps": applied,
     }
 
+
 def process_plot(plot_cfg: dict, base_output: str) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
-    import os
 
     plot_cfg = copy.deepcopy(plot_cfg)
     safe_title = plot_cfg["title"].replace(" ", "_")
@@ -663,12 +550,12 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     data_prep = prepare_datafile(plot_cfg, plot_dir)
     plot_cfg["datafile"] = data_prep["path"]
 
-    # --- Main fit ---
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
     params = parse_fit_output(output_text)
 
-    # --- Optional residuals ---
+    residuals_path: str | None
+    metrics: dict | None
     if params and plot_cfg.get("residuals", True):
         residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
         metrics = compute_residual_metrics(
@@ -687,7 +574,6 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     elif column_map.get("weight"):
         confidence_notes = f"Fit weighted by column {column_map['weight']}"
 
-    # --- Package result ---
     result = {
         "title": plot_cfg["title"],
         "formula": plot_cfg["fit_formula"],
@@ -710,9 +596,7 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
     return result
 
 
-def main():
-    import json, datetime, os
-
+def main() -> int:
     config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
 
     with open(config_path, "r", encoding="utf-8") as f:
@@ -724,14 +608,12 @@ def main():
         print(f"[X] {exc}")
         return 1
 
-    # Base output folder
     ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     base_output = os.path.abspath(os.path.join("outputs", ts))
     os.makedirs(base_output, exist_ok=True)
 
     print(f"[RUN] Starting batch at {ts} ({len(plots)} plots)")
 
-    # Run in parallel
     results = []
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = [executor.submit(process_plot, plot_cfg, base_output) for plot_cfg in plots]
@@ -741,7 +623,6 @@ def main():
             except Exception as e:
                 print(f"[X] Error in one plot: {e}")
 
-    # Consolidate and save
     all_results = {"timestamp": ts, "results": results}
     json_path = os.path.join(base_output, "fit_results.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -749,6 +630,7 @@ def main():
 
     print(f"\n[COMPLETE] All fits complete. Results saved to:\n{json_path}")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main() or 0)
