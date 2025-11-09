@@ -242,7 +242,10 @@ def process_plot(
         "confidence_notes": confidence_notes,
     }
 
-    print(f"[OK] Finished: {plot_cfg['title']}")
+    if dispatcher:
+        dispatcher.emit("plot-complete", title=plot_cfg.get("title", "Untitled"))
+    else:
+        print(f"[OK] Finished: {plot_cfg['title']}")
     return result
 
 

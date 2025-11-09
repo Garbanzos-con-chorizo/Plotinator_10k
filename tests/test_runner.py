@@ -93,6 +93,7 @@ def test_run_job_produces_artifacts(
 
     event_types = {event["type"] for event in events}
     assert {"job-start", "plot-start", "report-exported", "job-complete"}.issubset(event_types)
+    assert any(event["type"] == "plot-complete" for event in events)
 
 
 def test_run_job_handles_pdf_export_error(
@@ -120,3 +121,4 @@ def test_run_job_handles_pdf_export_error(
     pdf_errors = [event for event in events if event["type"] == "report-error"]
     assert pdf_errors and pdf_errors[0]["stage"] == "pdf"
     assert any(event["type"] == "job-complete" for event in events)
+    assert any(event["type"] == "plot-complete" for event in events)
