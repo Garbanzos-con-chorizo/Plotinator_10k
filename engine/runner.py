@@ -6,7 +6,7 @@ import json
 import os
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any
+from typing import Any, Callable, Dict
 
 from .config import normalize_plots
 from .data_pipeline import prepare_datafile
@@ -19,8 +19,51 @@ from .script_builder import (
 __all__ = [
     "run_gnuplot_script",
     "process_plot",
+    "run_job",
     "run_batch",
 ]
+
+
+class _EventDispatcher:
+    """Dispatch structured events to an optional callback with CLI fallbacks."""
+
+    def __init__(self, callback: Callable[[dict[str, Any]], None] | None = None) -> None:
+        self._callback = callback
+
+    def emit(self, event_type: str, **payload: Any) -> None:
+        event: dict[str, Any] = {"type": event_type}
+        event.update(payload)
+        if self._callback:
+            self._callback(event)
+        else:
+            self._default_handle(event)
+
+    def log(self, message: str) -> None:
+        self.emit("log", message=message)
+
+    @staticmethod
+    def _default_handle(event: Dict[str, Any]) -> None:
+        etype = event.get("type")
+        if etype == "log":
+            message = event.get("message", "")
+            if message:
+                print(message)
+        elif etype == "job-start":
+            ts = event.get("timestamp") or ""
+            total = event.get("total") or 0
+            print(f"[RUN] Starting batch at {ts} ({total} plots)")
+        elif etype == "plot-start":
+            print(f"[RUN] Processing: {event.get('title', 'Unknown plot')}")
+        elif etype == "plot-complete":
+            print(f"[OK] Finished: {event.get('title', 'Unknown plot')}")
+        elif etype == "plot-error":
+            print(f"[X] Error in one plot: {event.get('error')}")
+        elif etype == "job-complete":
+            results_path = event.get("results_path", "")
+            if results_path:
+                print(f"\n[COMPLETE] All fits complete. Results saved to:\n{results_path}")
+        elif etype == "job-error":
+            print(f"[X] {event.get('error')}")
 
 
 def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
@@ -83,10 +126,16 @@ def _dataset_report_entry(dataset: dict) -> dict[str, Any]:
     }
 
 
-def process_plot(plot_cfg: dict, base_output: str) -> dict:
+def process_plot(
+    plot_cfg: dict,
+    base_output: str,
+    dispatcher: _EventDispatcher | None = None,
+) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
 
     plot_cfg = copy.deepcopy(plot_cfg)
+    if dispatcher:
+        dispatcher.emit("plot-start", title=plot_cfg.get("title", "Untitled"))
     safe_title = plot_cfg["title"].replace(" ", "_")
     plot_dir = os.path.join(base_output, f"plot_{safe_title}")
     os.makedirs(plot_dir, exist_ok=True)
@@ -178,41 +227,85 @@ def process_plot(plot_cfg: dict, base_output: str) -> dict:
         "confidence_notes": confidence_notes,
     }
 
-    print(f"[OK] Finished: {plot_cfg['title']}")
+    if dispatcher:
+        dispatcher.emit("plot-complete", title=plot_cfg.get("title", "Untitled"), result=result)
+
     return result
 
 
-def run_batch(config_path: str, *, max_workers: int = 4) -> dict[str, Any]:
+def run_job(
+    config: dict,
+    *,
+    config_path: str = "config.json",
+    max_workers: int = 4,
+    output_dir: str | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Execute a batch fit job from an in-memory config definition."""
+
+    dispatcher = _EventDispatcher(on_event)
+    try:
+        plots = normalize_plots(config, config_path)
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base_output = output_dir or os.path.abspath(os.path.join("outputs", ts))
+        os.makedirs(base_output, exist_ok=True)
+
+        dispatcher.emit("job-start", timestamp=ts, total=len(plots), output_dir=base_output)
+
+        results: list[dict[str, Any]] = []
+        futures: dict[Any, dict] = {}
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            for plot_cfg in plots:
+                futures[executor.submit(process_plot, plot_cfg, base_output, dispatcher)] = plot_cfg
+
+            for future in as_completed(futures):
+                plot_cfg = futures[future]
+                title = plot_cfg.get("title", "Unnamed plot")
+                try:
+                    result = future.result()
+                except Exception as exc:  # noqa: BLE001 - propagate with logging
+                    dispatcher.emit("plot-error", title=title, error=str(exc))
+                    continue
+                results.append(result)
+
+        all_results = {"timestamp": ts, "results": results}
+        json_path = os.path.join(base_output, "fit_results.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+        dispatcher.emit(
+            "job-complete",
+            timestamp=ts,
+            results=results,
+            output_dir=base_output,
+            results_path=json_path,
+        )
+
+        return {
+            "timestamp": ts,
+            "results": results,
+            "output_dir": base_output,
+            "results_path": json_path,
+        }
+    except Exception as exc:
+        dispatcher.emit("job-error", error=str(exc))
+        raise
+
+
+def run_batch(
+    config_path: str,
+    *,
+    max_workers: int = 4,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    plots = normalize_plots(cfg, config_path)
-
-    ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    base_output = os.path.abspath(os.path.join("outputs", ts))
-    os.makedirs(base_output, exist_ok=True)
-
-    print(f"[RUN] Starting batch at {ts} ({len(plots)} plots)")
-
-    results: list[dict[str, Any]] = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_plot, plot_cfg, base_output) for plot_cfg in plots]
-        for future in as_completed(futures):
-            try:
-                results.append(future.result())
-            except Exception as exc:  # noqa: BLE001 - propagate with logging
-                print(f"[X] Error in one plot: {exc}")
-
-    all_results = {"timestamp": ts, "results": results}
-    json_path = os.path.join(base_output, "fit_results.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(all_results, f, indent=2, ensure_ascii=False)
-
-    print(f"\n[COMPLETE] All fits complete. Results saved to:\n{json_path}")
-
-    return {
-        "timestamp": ts,
-        "results": results,
-        "output_dir": base_output,
-        "results_path": json_path,
-    }
+    return run_job(
+        cfg,
+        config_path=config_path,
+        max_workers=max_workers,
+        on_event=on_event,
+    )
