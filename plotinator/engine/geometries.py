@@ -1,466 +1,574 @@
-"""Geometry registry and plotting strategies for Plotinator.
+"""Geometry strategy registry for Plotinator.
 
-This module centralizes the definition of supported plot geometries.
-Each geometry strategy is responsible for validating user options and
-emitting gnuplot scripts (and optional auxiliary assets) tailored to the
-geometry.
+This module centralises geometry-specific behaviour (validation rules,
+GNUplot script generation, auxiliary asset descriptors) in a way that is
+extensible without touching the rest of the application.
 """
-
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
-
-__all__ = [
-    "GeometryOption",
-    "GeometryScript",
-    "GeometryStrategy",
-    "GeometryValidationError",
-    "register_geometry",
-    "get_geometry",
-    "list_geometries",
-]
-
-
-class GeometryValidationError(ValueError):
-    """Raised when a geometry option payload is invalid."""
+from typing import Any, Callable, Dict, Iterable, List, MutableMapping
 
 
 @dataclass(frozen=True)
-class GeometryOption:
-    """Metadata describing a geometry option exposed to the UI."""
+class GeometryOptionSpec:
+    """Describe a geometry-specific option for UI and validation."""
 
     name: str
     label: str
-    kind: str = "str"  # "str", "int", "float", "bool"
-    default: Any = None
-    required: bool = False
-    min_value: Optional[float] = None
-    max_value: Optional[float] = None
-    choices: Optional[Iterable[Any]] = None
-    help_text: str = ""
+    option_type: str
+    default: Any
+    description: str = ""
+    min_value: float | None = None
+    max_value: float | None = None
+    choices: tuple[str, ...] | None = None
 
 
 @dataclass
-class GeometryScript:
-    """Bundle of gnuplot commands for a geometry render."""
+class AuxiliaryScript:
+    """Definition of an auxiliary render to be generated for a plot."""
 
-    main: str
-    residuals: Optional[str] = None
-    auxiliary: List[Tuple[str, str, str]] = field(default_factory=list)
-    # (script, output_path, caption)
+    output: str
+    caption: str
+    script: str
+    kind: str = "image"
+    cleanup: List[str] = field(default_factory=list)
 
 
 class GeometryStrategy:
-    """Base class for geometry behaviours."""
+    """Base class for plot geometry strategies."""
 
-    name: str = ""
+    key: str = ""
     label: str = ""
-    description: str = ""
-    options: List[GeometryOption] = []
-    supports_fit: bool = False
-    supports_residuals: bool = False
+    option_specs: tuple[GeometryOptionSpec, ...] = ()
+    supports_residuals: bool = True
+    uses_fit: bool = True
 
-    def validate(
-        self,
-        options: Optional[Mapping[str, Any]],
-        *,
-        data_columns: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Validate and sanitize a geometry options payload."""
-
-        sanitized: Dict[str, Any] = {}
-        payload = dict(options or {})
-
-        for opt in self.options:
-            raw = payload.get(opt.name, opt.default)
-            if raw is None:
-                if opt.required:
-                    raise GeometryValidationError(
-                        f"Missing required option '{opt.label}' for geometry '{self.label}'"
+    def normalize_options(self, options: MutableMapping[str, Any] | None) -> Dict[str, Any]:
+        opts: Dict[str, Any] = {}
+        provided = options or {}
+        for spec in self.option_specs:
+            value = provided.get(spec.name, spec.default)
+            if spec.option_type in {"int", "column"}:
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Option '{spec.label}' must be an integer") from None
+                if spec.min_value is not None and value < spec.min_value:
+                    raise ValueError(
+                        f"Option '{spec.label}' must be ≥ {spec.min_value}"
                     )
-                continue
+                if spec.max_value is not None and value > spec.max_value:
+                    raise ValueError(
+                        f"Option '{spec.label}' must be ≤ {spec.max_value}"
+                    )
+            elif spec.option_type == "float":
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    raise ValueError(f"Option '{spec.label}' must be a number") from None
+                if spec.min_value is not None and value < spec.min_value:
+                    raise ValueError(
+                        f"Option '{spec.label}' must be ≥ {spec.min_value}"
+                    )
+                if spec.max_value is not None and value > spec.max_value:
+                    raise ValueError(
+                        f"Option '{spec.label}' must be ≤ {spec.max_value}"
+                    )
+            elif spec.option_type == "bool":
+                value = bool(value)
+            elif spec.option_type == "choice":
+                if spec.choices and str(value) not in spec.choices:
+                    allowed = ", ".join(spec.choices)
+                    raise ValueError(
+                        f"Option '{spec.label}' must be one of: {allowed}"
+                    )
+                value = str(value)
+            else:
+                value = str(value) if value is not None else ""
+            opts[spec.name] = value
+        return opts
 
-            try:
-                if opt.kind == "int":
-                    value = int(raw)
-                elif opt.kind == "float":
-                    value = float(raw)
-                elif opt.kind == "bool":
-                    if isinstance(raw, str):
-                        value = raw.strip().lower() in {"1", "true", "yes", "on"}
-                    else:
-                        value = bool(raw)
-                else:
-                    value = str(raw)
-            except (TypeError, ValueError) as exc:
-                raise GeometryValidationError(
-                    f"Invalid value for option '{opt.label}': {raw!r}"
-                ) from exc
-
-            if opt.min_value is not None and value < opt.min_value:
-                raise GeometryValidationError(
-                    f"Option '{opt.label}' must be ≥ {opt.min_value}, got {value}"
-                )
-            if opt.max_value is not None and value > opt.max_value:
-                raise GeometryValidationError(
-                    f"Option '{opt.label}' must be ≤ {opt.max_value}, got {value}"
-                )
-            if opt.choices is not None and value not in opt.choices:
-                raise GeometryValidationError(
-                    f"Option '{opt.label}' must be one of {list(opt.choices)}, got {value}"
-                )
-
-            sanitized[opt.name] = value
-
-        return self._post_validate(sanitized, data_columns=data_columns)
-
-    # ------------------------------------------------------------------
-    def _post_validate(
+    # pylint: disable=unused-argument
+    def build_primary_script(
         self,
-        options: Dict[str, Any],
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
         *,
-        data_columns: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """Hook for subclasses to implement extra validation rules."""
-
-        return options
-
-    # ------------------------------------------------------------------
-    def generate_gnuplot(
-        self,
-        plot_cfg: Mapping[str, Any],
-        out_plot: Optional[str],
-        out_residuals: Optional[str] = None,
-    ) -> GeometryScript:
+        out_plot: str | None,
+        out_residuals: str | None,
+    ) -> str:
         raise NotImplementedError
 
-    # ------------------------------------------------------------------
-    def generate_matplotlib(
+    def build_auxiliary_scripts(
         self,
-        plot_cfg: Mapping[str, Any],
-    ) -> Optional[str]:
-        """Optional Matplotlib adapter (currently unused)."""
-
-        return None
-
-
-_REGISTRY: Dict[str, GeometryStrategy] = {}
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
+        *,
+        plot_dir: str,
+    ) -> List[AuxiliaryScript]:
+        return []
 
 
-def register_geometry(strategy: GeometryStrategy) -> None:
-    key = strategy.name.lower()
-    _REGISTRY[key] = strategy
+class GeometryRegistry:
+    """Simple registry to manage available geometry strategies."""
+
+    def __init__(self) -> None:
+        self._strategies: Dict[str, GeometryStrategy] = {}
+
+    def register(self, strategy: GeometryStrategy) -> None:
+        self._strategies[strategy.key] = strategy
+
+    def get(self, key: str) -> GeometryStrategy:
+        try:
+            return self._strategies[key]
+        except KeyError as exc:
+            raise KeyError(f"Unknown geometry '{key}'") from exc
+
+    def all(self) -> Iterable[GeometryStrategy]:
+        return self._strategies.values()
+
+    def choices(self) -> List[tuple[str, str]]:
+        return [(strategy.key, strategy.label) for strategy in self._strategies.values()]
 
 
-def get_geometry(name: str) -> GeometryStrategy:
-    try:
-        return _REGISTRY[name.lower()]
-    except KeyError as exc:
-        raise KeyError(f"Unknown geometry '{name}'. Registered: {list(_REGISTRY)}") from exc
-
-
-def list_geometries() -> List[GeometryStrategy]:
-    return sorted(_REGISTRY.values(), key=lambda g: g.label.lower())
+geometry_registry = GeometryRegistry()
 
 
 # ---------------------------------------------------------------------------
-# Concrete strategies
-# ---------------------------------------------------------------------------
+# Concrete geometries
 
-class LineFitGeometry(GeometryStrategy):
-    name = "line"
-    label = "Line / Curve Fit"
-    description = "Standard 2D fit with optional residuals."
-    options: List[GeometryOption] = []
-    supports_fit = True
+
+class LineGeometry(GeometryStrategy):
+    key = "line"
+    label = "Curve Fit"
+    option_specs: tuple[GeometryOptionSpec, ...] = ()
     supports_residuals = True
+    uses_fit = True
 
-    def generate_gnuplot(
+    def build_primary_script(
         self,
-        plot_cfg: Mapping[str, Any],
-        out_plot: Optional[str],
-        out_residuals: Optional[str] = None,
-    ) -> GeometryScript:
-        style = plot_cfg.get("style", {})
-        pt = style.get("point_type", 7)
-        lw = style.get("line_width", 2)
-        col = style.get("line_color", "black")
-
-        formula = plot_cfg["fit_formula"]
-        params = plot_cfg["fit_params"]
-        params_csv = ",".join(params)
-        datafile = plot_cfg["datafile"].replace("\\", "/")
-        use_err = plot_cfg.get("error_bars", False)
-
-        overrides = plot_cfg.get("initial_params") or {}
-        guesses = dict(plot_cfg.get("computed_initials", {}))
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
+        *,
+        out_plot: str | None,
+        out_residuals: str | None,
+    ) -> str:
+        datafile = helpers["abspath"](cfg["datafile"])
+        params = cfg["fit_params"]
+        formula = cfg["fit_formula"]
+        guesses = helpers["estimate_initial_params"](datafile, formula, params)
+        overrides = cfg.get("initial_params") or {}
         for key, value in overrides.items():
             if key in guesses:
                 guesses[key] = value
-
         init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
         prints = "\n".join([
             (
-                f'if (exists("{p}_err")) {{ '
-                f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) '
-                f'}} else {{ '
-                f'print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
+                "if (exists(\"{p}_err\")) {{ "
+                "print sprintf(\"PYFIT %s %0.16g %0.16g\", \"{p}\", {p}, {p}_err) "
+                "}} else { print sprintf(\"PYFIT %s %0.16g %0.16g\", \"{p}\", {p}, 0.0) }"
             )
             for p in params
         ])
 
-        main_lines = [
+        style = cfg.get("style", {})
+        pt = style.get("point_type", 7)
+        lw = style.get("line_width", 2)
+        col = style.get("line_color", "black")
+        use_err = cfg.get("error_bars", False)
+
+        code = [
             "set encoding utf8",
             "set terminal pngcairo size 800,600",
-            f"set title \"{plot_cfg['title']}\"",
+            f"set title \"{cfg['title']}\"",
             "set xlabel \"X\"",
             "set ylabel \"Y\"",
-            "",
             "set fit errorvariables",
             init_lines,
-            "",
             f"f(x) = {formula}",
-            f"fit f(x) \"{datafile}\" via {params_csv}",
-            "",
+            f"fit f(x) \"{datafile}\" via {','.join(params)}",
             prints,
-            "",
         ]
 
         if out_plot:
-            main_lines.append(f"set output \"{out_plot}\"")
+            code.append(f"set output \"{out_plot}\"")
             if use_err:
-                main_lines.append(
+                code.append(
                     (
-                        f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\\n"
-                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
+                        f"plot \"{datafile}\" using 1:2:3 with yerrorbars title \"Data ±σ\" pt {pt}, \\",
+                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"",
                     )
                 )
             else:
-                main_lines.append(
+                code.append(
                     (
-                        f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\\n"
-                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\""
+                        f"plot \"{datafile}\" using 1:2 title \"Data\" with points pt {pt}, \\",
+                        f"     f(x) title sprintf(\"{formula}\") with lines lw {lw} lc rgb \"{col}\"",
                     )
                 )
-            main_lines.append("unset output")
+            code.append("unset output")
 
-        residual_script = None
         if out_residuals:
-            residual_lines = [
-                f"set output \"{out_residuals}\"",
-                f"set title \"Residuals — {plot_cfg['title']}\"",
-                "set xlabel \"X\"",
-                "set ylabel \"Residual (y - f(x))\"",
-                "set grid back",
-                f"plot \"{datafile}\" using 1:($2 - f($1)) with points pt {pt} title \"Residuals\", \\",
-                "     0 with lines notitle lc rgb \"gray\"",
-                "unset output",
-            ]
-            residual_script = "\n".join(residual_lines)
+            code.extend(
+                [
+                    f"set output \"{out_residuals}\"",
+                    f"set title \"Residuals — {cfg['title']}\"",
+                    "set xlabel \"X\"",
+                    "set ylabel \"Residual (y - f(x))\"",
+                    "set grid back",
+                    (
+                        f"plot \"{datafile}\" using 1:($2 - f($1)) with points pt {pt} title \"Residuals\", \\",
+                        "     0 with lines notitle lc rgb \"gray\"",
+                    ),
+                    "unset output",
+                ]
+            )
 
-        return GeometryScript(main="\n".join(main_lines), residuals=residual_script)
+        return "\n".join(
+            part if isinstance(part, str) else "\n".join(part) for part in code
+        )
 
 
 class HistogramGeometry(GeometryStrategy):
-    name = "histogram"
+    key = "histogram"
     label = "Histogram"
-    description = "1D histogram rendered with boxes."
-    options = [
-        GeometryOption("column", "Data column", "int", default=1, min_value=1),
-        GeometryOption("bins", "Number of bins", "int", default=20, min_value=1),
-    ]
+    option_specs = (
+        GeometryOptionSpec(
+            name="column",
+            label="Data column",
+            option_type="column",
+            default=2,
+            min_value=1,
+            description="Column index to build histogram from (1-indexed).",
+        ),
+        GeometryOptionSpec(
+            name="bins",
+            label="Bin count",
+            option_type="int",
+            default=20,
+            min_value=1,
+            max_value=500,
+            description="Number of histogram bins.",
+        ),
+    )
+    supports_residuals = False
+    uses_fit = False
 
-    def _post_validate(
+    def build_primary_script(
         self,
-        options: Dict[str, Any],
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
         *,
-        data_columns: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        col = options.get("column", 1)
-        if data_columns is not None and col > data_columns:
-            raise GeometryValidationError(
-                f"Histogram column index {col} exceeds available columns ({data_columns})"
-            )
-        return options
-
-    def generate_gnuplot(
-        self,
-        plot_cfg: Mapping[str, Any],
-        out_plot: Optional[str],
-        out_residuals: Optional[str] = None,
-    ) -> GeometryScript:
-        if not out_plot:
-            raise GeometryValidationError("Histogram geometry requires an output path")
-
-        datafile = plot_cfg["datafile"].replace("\\", "/")
-        style = plot_cfg.get("style", {})
-        color = style.get("line_color", "#1f77b4")
-        options = plot_cfg.get("geometry_options", {})
-        column = options.get("column", 1)
-        bins = options.get("bins", 20)
-
-        main_lines = [
+        out_plot: str | None,
+        out_residuals: str | None,
+    ) -> str:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        column = opts.get("column", 2)
+        bins = opts.get("bins", 20)
+        style = cfg.get("style", {})
+        fill = style.get("fill_color") or style.get("line_color", "#1f77b4")
+        edge = style.get("line_color", "black")
+        code = [
             "set encoding utf8",
             "set terminal pngcairo size 800,600",
-            f"set title \"{plot_cfg['title']}\"",
+            f"set title \"{cfg['title']} — Histogram\"",
             "set xlabel \"Value\"",
             "set ylabel \"Frequency\"",
-            f"stats \"{datafile}\" using {column} name \"STATS\" nooutput",
-            f"binwidth = (STATS_max - STATS_min) / {bins}",
-            "if (binwidth <= 0) binwidth = 1",
-            "set boxwidth binwidth",
-            "set style fill solid 0.6 border -1",
-            "set xtics binwidth",
-            "set xrange [STATS_min:STATS_max]",
-            f"set output \"{out_plot}\"",
-            (
-                f"plot \"{datafile}\" using (floor($${column}/binwidth)*binwidth + binwidth/2.0):(1.0) "
-                f"smooth freq with boxes lc rgb \"{color}\" title \"{plot_cfg['title']}\""
-            ),
+            "set style fill solid 0.7 border line",
+            "set boxwidth 0.95 relative",
+            f"stats \"{datafile}\" using {column} name 'ST' nooutput",
+            f"bin_width = (ST_max - ST_min) / {float(bins)}",
+            "if (bin_width <= 0) bin_width = 1",
+            "bin(x,width) = width * floor(x/width) + width/2.0",
+        ]
+        if out_plot:
+            code.extend(
+                [
+                    f"set output \"{out_plot}\"",
+                    (
+                        f"plot \"{datafile}\" using (bin($${column}, bin_width)):(1.0) ",
+                        "smooth freq with boxes",
+                        f" lc rgb \"{fill}\"",
+                        f" border lc rgb \"{edge}\"",
+                        f" title \"{cfg['title']}\"",
+                    ),
+                    "unset output",
+                ]
+            )
+        return "\n".join(
+            part if isinstance(part, str) else "".join(part) for part in code
+        )
+
+    def build_auxiliary_scripts(
+        self,
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
+        *,
+        plot_dir: str,
+    ) -> List[AuxiliaryScript]:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        column = opts.get("column", 2)
+        style = cfg.get("style", {})
+        color = style.get("line_color", "#1f77b4")
+        output = helpers["join"](plot_dir, "hist_density.png")
+        script_lines = [
+            "set encoding utf8",
+            "set terminal pngcairo size 800,600",
+            f"set output \"{output}\"",
+            f"set title \"{cfg['title']} — Kernel Density\"",
+            "set xlabel \"Value\"",
+            "set ylabel \"Density\"",
+            "set grid back",
+            f"plot \"{datafile}\" using {column}:(1.0) smooth kdensity lw 2 lc rgb \"{color}\" title \"Density\"",
             "unset output",
         ]
-
-        return GeometryScript(main="\n".join(main_lines))
+        return [
+            AuxiliaryScript(
+                output=output,
+                caption="Kernel density estimate",
+                script="\n".join(script_lines),
+            )
+        ]
 
 
 class HeatmapGeometry(GeometryStrategy):
-    name = "heatmap"
+    key = "heatmap"
     label = "Heatmap"
-    description = "2D heatmap rendered with pm3d."
-    options = [
-        GeometryOption("x_column", "X column", "int", default=1, min_value=1),
-        GeometryOption("y_column", "Y column", "int", default=2, min_value=1),
-        GeometryOption("z_column", "Z column", "int", default=3, min_value=1),
-    ]
+    option_specs = (
+        GeometryOptionSpec(
+            name="x_column",
+            label="X column",
+            option_type="column",
+            default=1,
+            min_value=1,
+        ),
+        GeometryOptionSpec(
+            name="y_column",
+            label="Y column",
+            option_type="column",
+            default=2,
+            min_value=1,
+        ),
+        GeometryOptionSpec(
+            name="z_column",
+            label="Z column",
+            option_type="column",
+            default=3,
+            min_value=1,
+        ),
+    )
+    supports_residuals = False
+    uses_fit = False
 
-    def _post_validate(
+    def build_primary_script(
         self,
-        options: Dict[str, Any],
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
         *,
-        data_columns: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        cols = [options.get("x_column", 1), options.get("y_column", 2), options.get("z_column", 3)]
-        if data_columns is not None and any(col > data_columns for col in cols):
-            raise GeometryValidationError(
-                f"Heatmap columns {cols} exceed available columns ({data_columns})"
-            )
-        return options
-
-    def generate_gnuplot(
-        self,
-        plot_cfg: Mapping[str, Any],
-        out_plot: Optional[str],
-        out_residuals: Optional[str] = None,
-    ) -> GeometryScript:
-        if not out_plot:
-            raise GeometryValidationError("Heatmap geometry requires an output path")
-
-        datafile = plot_cfg["datafile"].replace("\\", "/")
-        options = plot_cfg.get("geometry_options", {})
-        x_col = options.get("x_column", 1)
-        y_col = options.get("y_column", 2)
-        z_col = options.get("z_column", 3)
-
-        lines = [
+        out_plot: str | None,
+        out_residuals: str | None,
+    ) -> str:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        x_col = opts.get("x_column", 1)
+        y_col = opts.get("y_column", 2)
+        z_col = opts.get("z_column", 3)
+        code = [
             "set encoding utf8",
             "set terminal pngcairo size 800,600",
-            f"set title \"{plot_cfg['title']}\"",
-            "set xlabel \"X\"",
-            "set ylabel \"Y\"",
+            f"set title \"{cfg['title']} — Heatmap\"",
             "set view map",
             "set pm3d map",
-            "set palette rgb 33,13,10",
-            f"set output \"{out_plot}\"",
-            (
-                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d title \"{plot_cfg['title']}\""
-            ),
-            "unset output",
+            "set xlabel \"X\"",
+            "set ylabel \"Y\"",
+            "set cblabel \"Intensity\"",
         ]
+        if out_plot:
+            code.extend(
+                [
+                    f"set output \"{out_plot}\"",
+                    f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle",
+                    "unset output",
+                ]
+            )
+        return "\n".join(filter(None, code))
 
-        return GeometryScript(main="\n".join(lines))
+    def build_auxiliary_scripts(
+        self,
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
+        *,
+        plot_dir: str,
+    ) -> List[AuxiliaryScript]:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        x_col = opts.get("x_column", 1)
+        y_col = opts.get("y_column", 2)
+        z_col = opts.get("z_column", 3)
+        contour_output = helpers["join"](plot_dir, "heatmap_contours.png")
+        contour_table = helpers["join"](plot_dir, "heatmap_contours_tmp.dat")
+        script = "\n".join(
+            [
+                "set encoding utf8",
+                "set terminal pngcairo size 800,600",
+                f"set output \"{contour_output}\"",
+                f"set title \"{cfg['title']} — Contours\"",
+                "set view map",
+                "set contour base",
+                "set cntrparam levels incremental 10",
+                f"set table '{contour_table}'",
+                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col}",
+                "unset table",
+                "set nocontour",
+                "set surface",
+                "set pm3d map",
+                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle, \\",
+                f"     '{contour_table}' with lines lc rgb 'black' notitle",
+                "unset output",
+            ]
+        )
+        return [
+            AuxiliaryScript(
+                output=contour_output,
+                caption="Heatmap with contour overlay",
+                script=script,
+                cleanup=[contour_table],
+            )
+        ]
 
 
 class SurfaceGeometry(GeometryStrategy):
-    name = "surface"
+    key = "surface"
     label = "3D Surface"
-    description = "3D surface plot with auxiliary top-down heatmap."
-    options = [
-        GeometryOption("x_column", "X column", "int", default=1, min_value=1),
-        GeometryOption("y_column", "Y column", "int", default=2, min_value=1),
-        GeometryOption("z_column", "Z column", "int", default=3, min_value=1),
-    ]
+    option_specs = (
+        GeometryOptionSpec(
+            name="x_column",
+            label="X column",
+            option_type="column",
+            default=1,
+            min_value=1,
+        ),
+        GeometryOptionSpec(
+            name="y_column",
+            label="Y column",
+            option_type="column",
+            default=2,
+            min_value=1,
+        ),
+        GeometryOptionSpec(
+            name="z_column",
+            label="Z column",
+            option_type="column",
+            default=3,
+            min_value=1,
+        ),
+        GeometryOptionSpec(
+            name="elevation",
+            label="Elevation",
+            option_type="float",
+            default=55.0,
+            min_value=0.0,
+            max_value=90.0,
+            description="3D view elevation (degrees).",
+        ),
+        GeometryOptionSpec(
+            name="azimuth",
+            label="Azimuth",
+            option_type="float",
+            default=120.0,
+            min_value=0.0,
+            max_value=360.0,
+            description="3D view azimuth (degrees).",
+        ),
+    )
+    supports_residuals = False
+    uses_fit = False
 
-    def _post_validate(
+    def build_primary_script(
         self,
-        options: Dict[str, Any],
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
         *,
-        data_columns: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        cols = [options.get("x_column", 1), options.get("y_column", 2), options.get("z_column", 3)]
-        if data_columns is not None and any(col > data_columns for col in cols):
-            raise GeometryValidationError(
-                f"Surface columns {cols} exceed available columns ({data_columns})"
-            )
-        return options
-
-    def generate_gnuplot(
-        self,
-        plot_cfg: Mapping[str, Any],
-        out_plot: Optional[str],
-        out_residuals: Optional[str] = None,
-    ) -> GeometryScript:
-        if not out_plot:
-            raise GeometryValidationError("Surface geometry requires an output path")
-
-        datafile = plot_cfg["datafile"].replace("\\", "/")
-        options = plot_cfg.get("geometry_options", {})
-        x_col = options.get("x_column", 1)
-        y_col = options.get("y_column", 2)
-        z_col = options.get("z_column", 3)
-        style = plot_cfg.get("style", {})
-        color = style.get("line_color", "#1f77b4")
-
-        main_lines = [
+        out_plot: str | None,
+        out_residuals: str | None,
+    ) -> str:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        x_col = opts.get("x_column", 1)
+        y_col = opts.get("y_column", 2)
+        z_col = opts.get("z_column", 3)
+        elev = opts.get("elevation", 55.0)
+        azim = opts.get("azimuth", 120.0)
+        code = [
             "set encoding utf8",
-            "set terminal pngcairo size 800,600",
-            f"set title \"{plot_cfg['title']}\"",
+            "set terminal pngcairo size 900,700",
+            f"set title \"{cfg['title']} — Surface\"",
+            f"set view {float(elev)},{float(azim)}",
+            "set pm3d at s",
+            "set hidden3d",
             "set xlabel \"X\"",
             "set ylabel \"Y\"",
             "set zlabel \"Z\"",
-            "set hidden3d",
-            "set ticslevel 0",
-            "set view 60, 135, 1, 1",
-            f"set output \"{out_plot}\"",
-            (
-                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with lines lc rgb \"{color}\" "
-                f"title \"{plot_cfg['title']}\""
-            ),
-            "unset output",
+        ]
+        if out_plot:
+            code.extend(
+                [
+                    f"set output \"{out_plot}\"",
+                    f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle",
+                    "unset output",
+                ]
+            )
+        return "\n".join(filter(None, code))
+
+    def build_auxiliary_scripts(
+        self,
+        cfg: Dict[str, Any],
+        helpers: Dict[str, Callable[..., Any]],
+        *,
+        plot_dir: str,
+    ) -> List[AuxiliaryScript]:
+        datafile = helpers["abspath"](cfg["datafile"])
+        opts = cfg.get("geometry_options", {})
+        x_col = opts.get("x_column", 1)
+        y_col = opts.get("y_column", 2)
+        z_col = opts.get("z_column", 3)
+        top_output = helpers["join"](plot_dir, "surface_topdown.png")
+        script = "\n".join(
+            filter(
+                None,
+                [
+                    "set encoding utf8",
+                    "set terminal pngcairo size 900,700",
+                    f"set output \"{top_output}\"",
+                    f"set title \"{cfg['title']} — Top-down Map\"",
+                    "set view map",
+                    "set pm3d map",
+                    "set xlabel \"X\"",
+                    "set ylabel \"Y\"",
+                    f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle",
+                    "unset output",
+                ],
+            )
+        )
+        return [
+            AuxiliaryScript(
+                output=top_output,
+                caption="Surface top-down heatmap",
+                script=script,
+            )
         ]
 
-        base, ext = (out_plot.rsplit(".", 1) + [""])[0:2]
-        aux_path = f"{base}_top.{ext or 'png'}"
-        aux_lines = [
-            "set encoding utf8",
-            "set terminal pngcairo size 800,600",
-            f"set title \"{plot_cfg['title']} — Top View\"",
-            "set view map",
-            "set pm3d map",
-            "set palette rgb 33,13,10",
-            f"set output \"{aux_path}\"",
-            (
-                f"splot \"{datafile}\" using {x_col}:{y_col}:{z_col} with pm3d notitle"
-            ),
-            "unset output",
-        ]
 
-        auxiliary = [("\n".join(aux_lines), aux_path, "Top-down heatmap projection")]
-        return GeometryScript(main="\n".join(main_lines), auxiliary=auxiliary)
+for strategy_cls in (LineGeometry, HistogramGeometry, HeatmapGeometry, SurfaceGeometry):
+    geometry_registry.register(strategy_cls())
 
 
-# Register built-in strategies
-register_geometry(LineFitGeometry())
-register_geometry(HistogramGeometry())
-register_geometry(HeatmapGeometry())
-register_geometry(SurfaceGeometry())
+__all__ = [
+    "geometry_registry",
+    "GeometryOptionSpec",
+    "AuxiliaryScript",
+    "GeometryStrategy",
+]

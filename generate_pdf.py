@@ -3,8 +3,6 @@ import os
 import shutil
 import pypandoc
 
-from plotinator.engine.geometries import get_geometry
-
 PANDOC_ENV_VAR = "PANDOC_PATH"
 
 
@@ -53,25 +51,18 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
 
     for item in data.get("results", []):
         title = item["title"]
-        formula = item.get("formula", "")
-        geometry_name = (item.get("geometry") or "line")
-        try:
-            geometry_label = get_geometry(geometry_name).label
-        except KeyError:
-            geometry_label = geometry_name.title()
-
+        formula = item["formula"]
         md.append(f"## {title}")
-        if formula:
-            md.append(f"**Formula:** `{formula}`  ")
-        else:
-            md.append("**Formula:** _(not applicable)_  ")
-        md.append(f"**Geometry:** {geometry_label}  ")
+        md.append(f"**Formula:** `{formula}`  ")
 
+        geometry_label = item.get("geometry_label") or item.get("geometry")
+        if geometry_label:
+            md.append(f"**Geometry:** {geometry_label}  ")
         options = item.get("geometry_options") or {}
         if options:
-            md.append("**Geometry options:**")
-            for key in sorted(options):
-                md.append(f"- `{key}`: {options[key]}")
+            md.append("**Geometry Options:**")
+            for opt_key, opt_val in options.items():
+                md.append(f"- {opt_key}: {opt_val}")
 
         # Parameters table
         params = item.get("parameters", {})
@@ -88,30 +79,30 @@ def generate_markdown_report(results_path: str, output_folder: str) -> str:
         metrics = item.get("metrics")
         if metrics:
             md.append(
-                "\n**Residual Metrics:**  \n"
+                f"\n**Residual Metrics:**  \n"
                 f"Mean = {metrics['mean']:.4g} Std = {metrics['std']:.4g} RMSE = {metrics['rmse']:.4g}\n"
             )
 
         # Images
         plot_path = os.path.relpath(item["output_plot"], output_folder).replace("\\", "/")
-        md.append(f"![Plot]({plot_path})")
-
         res_path = item.get("residuals_plot")
+        md.append(f"![Plot]({plot_path})")
         if res_path:
             residuals_path = os.path.relpath(res_path, output_folder).replace("\\", "/")
             md.append(f"![Residuals]({residuals_path})")
 
-        for asset in item.get("auxiliary_assets", []):
+        for asset in item.get("extra_assets", []):
             asset_path = asset.get("path")
             if not asset_path:
                 continue
             rel_asset = os.path.relpath(asset_path, output_folder).replace("\\", "/")
-            caption = asset.get("caption") or "Auxiliary view"
+            caption = asset.get("caption") or asset.get("kind") or "Additional asset"
             md.append(f"![{caption}]({rel_asset})")
             if caption:
-                md.append(f"*{caption}*")
+                md.append(f"_{caption}_")
 
         md.append("\n---\n")
+
     markdown_text = "\n".join(md)
     md_file = os.path.join(output_folder, "report.md")
     with open(md_file, "w", encoding="utf-8") as f:

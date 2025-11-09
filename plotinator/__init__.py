@@ -1,1 +1,1 @@
-"""Plotinator package."""
+"""Plotinator package initialization."""
