@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import queue
 import subprocess
@@ -40,6 +41,8 @@ class PlotinatorApp(ttkb.Window):
         self._progress_total = 0
         self._progress_completed = 0
         self.status_var = tk.StringVar(self, value="Idle")
+        self._images: dict[str, tk.PhotoImage] = {}
+        self._load_images()
 
         self._create_widgets()
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -49,20 +52,27 @@ class PlotinatorApp(ttkb.Window):
     def _create_widgets(self) -> None:
         header = ttkb.Frame(self, padding=10)
         header.pack(fill="x")
+        if (logo := self._images.get("icon_header")) is not None:
+            ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
         ttkb.Label(header, text="⚙️ Plotinator 100000", font=("Segoe UI", 22, "bold")).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
 
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
-        for text, cmd, style in [
-            ("📂 Data Folder", self.select_folder, "info-outline"),
-            ("➕ Add Fit", self.add_fit, "success-outline"),
-            ("🗑 Delete Fit", self.delete_fit, "danger-outline"),
-            ("💾 Save Config", self.save_config, "secondary-outline"),
-            ("🚀 Run Batch", self.run_batch, "success"),
-            ("📘 Open Report", self.open_latest_report, "primary-outline"),
-        ]:
-            ttkb.Button(toolbar, text=text, command=cmd, bootstyle=style).pack(side="left", padx=4)
+        toolbar_logo = self._images.get("toolbar_button")
+        button_plan = [
+            ("Data Folder", self.select_folder, "info-outline", True),
+            ("Add Fit", self.add_fit, "success-outline", False),
+            ("Delete Fit", self.delete_fit, "danger-outline", True),
+            ("Save Config", self.save_config, "secondary-outline", False),
+            ("Run Batch", self.run_batch, "success", True),
+            ("Open Report", self.open_latest_report, "primary-outline", False),
+        ]
+        for text, cmd, style, use_logo in button_plan:
+            kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
+            if use_logo and toolbar_logo is not None:
+                kwargs.update({"image": toolbar_logo, "compound": "left", "padding": (6, 4)})
+            ttkb.Button(toolbar, **kwargs).pack(side="left", padx=4)
 
         table_frame = ttkb.Frame(self, padding=10)
         table_frame.pack(fill="both", expand=True)
@@ -75,16 +85,60 @@ class PlotinatorApp(ttkb.Window):
 
         progress_frame = ttkb.Frame(self, padding=(10, 0))
         progress_frame.pack(fill="x")
-        ttkb.Label(progress_frame, textvariable=self.status_var, anchor="w").pack(
-            fill="x", pady=(0, 6)
-        )
+        status_label = ttkb.Label(progress_frame, textvariable=self.status_var, anchor="w")
+        if (status_icon := self._images.get("toolbar_status")) is not None:
+            status_label.configure(image=status_icon, compound="left", padding=(4, 0))
+        status_label.pack(fill="x", pady=(0, 6))
         self.progress = ttkb.Progressbar(progress_frame, mode="determinate", bootstyle="info-striped")
         self.progress.pack(fill="x")
 
-        log_frame = ttkb.Labelframe(self, text="Batch log", padding=10)
+        log_frame = ttkb.Labelframe(self, padding=10)
+        if (log_icon := self._images.get("toolbar_log")) is not None:
+            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
+            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
+            log_frame.configure(labelwidget=log_label)
+        else:
+            log_frame.configure(text="Batch log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=10)
         self.log_text = tk.Text(log_frame, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14")
         self.log_text.pack(fill="both", expand=True)
+
+    # ------------------------------------------------------------------
+    def _scale_image(self, image: tk.PhotoImage, target: int) -> tk.PhotoImage:
+        width = image.width()
+        height = image.height()
+        scale = max(width / target, height / target)
+        if scale <= 1:
+            return image
+        factor = int(math.ceil(scale))
+        return image.subsample(factor, factor)
+
+    # ------------------------------------------------------------------
+    def _load_images(self) -> None:
+        base_path = Path(__file__).resolve().parent
+        assets = {
+            "icon": base_path / "General-logo.png",
+            "toolbar": base_path / "Toolbar-noText-Logo.png",
+        }
+        for key, path in assets.items():
+            if not path.exists():
+                continue
+            try:
+                self._images[key] = tk.PhotoImage(file=path.as_posix())
+            except tk.TclError:
+                continue
+
+        icon = self._images.get("icon")
+        if icon is not None:
+            self.iconphoto(True, icon)
+            self._images["icon_header"] = self._scale_image(icon, 64)
+            self._images["icon_toast"] = self._scale_image(icon, 32)
+
+        toolbar_icon = self._images.get("toolbar")
+        if toolbar_icon is not None:
+            self._images["toolbar_button"] = self._scale_image(toolbar_icon, 28)
+            self._images["toolbar_status"] = self._scale_image(toolbar_icon, 22)
+            self._images["toolbar_log"] = self._scale_image(toolbar_icon, 48)
 
     # ------------------------------------------------------------------
     def toggle_theme(self) -> None:
