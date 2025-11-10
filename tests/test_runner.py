@@ -18,7 +18,11 @@ def _install_pipeline_stubs(
 ) -> None:
     """Replace external tooling with deterministic fakes for the run pipeline."""
 
-    def fake_generate_gnuplot_code(plot_cfg: dict, out_plot: Optional[str] = None, out_residuals: Optional[str] = None) -> str:
+    def fake_generate_gnuplot_code(
+        plot_cfg: dict,
+        out_plot: Optional[str] = None,
+        out_residuals: Optional[str] = None,
+    ) -> str:
         target = out_plot or out_residuals or "plot"
         return f"# gnuplot script for {target}"
 
@@ -105,7 +109,11 @@ def test_run_job_handles_pdf_export_error(
     """PDF export failures should be reported but not abort the job."""
 
     events: list[dict] = []
-    _install_pipeline_stubs(monkeypatch, sample_paths.output_dir, export_pdf_exception=RuntimeError("pdf unavailable"))
+    _install_pipeline_stubs(
+        monkeypatch,
+        sample_paths.output_dir,
+        export_pdf_exception=RuntimeError("pdf unavailable"),
+    )
 
     result = runner.run_job(
         minimal_config,
