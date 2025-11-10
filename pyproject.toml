@@ -61,7 +61,7 @@ py-modules = [
 
 [tool.ruff]
 select = ["E", "F", "I", "B"]
-line-length = 100
+line-length = 120
 
 [tool.pytest.ini_options]
 addopts = "--cov=plot_manager --cov=reports --cov-report=term-missing"
