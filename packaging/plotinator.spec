@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import os
+import os, sys
 import shutil
 from pathlib import Path
 
@@ -11,7 +11,11 @@ from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
-ROOT = Path(__file__).resolve().parents[1]
+# Safely compute the root path regardless of __file__ availability
+try:
+    ROOT = Path(os.path.abspath(__file__)).resolve().parents[1]
+except NameError:
+    ROOT = Path(sys.argv[0]).resolve().parents[1]
 
 
 def _gather_package_modules(*package_names: str) -> list[str]:

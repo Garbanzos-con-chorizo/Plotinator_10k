@@ -1,37 +1,63 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  WiX Toolset template for bundling the Plotinator 10k PyInstaller output into an MSI.
-  - Generated component groups from Heat should be emitted to `packaging/windows/plotinator-files.wxs`
-    with the identifier `PlotinatorBundleComponents`.
-  - Inject the project version via the PLOTINATOR_VERSION preprocessor variable when compiling with Candle.
-  - Replace the placeholder UpgradeCode with a stable GUID before shipping your first release.
+  WiX v6 schema version of the Plotinator 10k installer definition.
+  Build example:
+      wix build Product.wxs plotinator-files.wxs ^
+           -ext WixToolset.UI.wixext ^
+           -out ..\..\dist\Plotinator_10k.msi ^
+           -dPLOTINATOR_VERSION=1.0.0
 -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*"
-           Name="Plotinator 10k"
-           Manufacturer="Plotinator Labs"
-           Version="$(var.PLOTINATOR_VERSION)"
-           UpgradeCode="00000000-0000-0000-0000-000000000000">
-    <Package InstallerVersion="500"
-             Compressed="yes"
-             InstallScope="perMachine" />
 
-    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
-    <MajorUpgrade DowngradeErrorMessage="A newer version of Plotinator 10k is already installed." />
+<wix xmlns="http://wixtoolset.org/schemas/v6/wxs">
 
-    <Property Id="ARPPRODUCTICON" Value="plotinator-gui.exe" />
-    <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+  <product
+      id="*"
+      name="Plotinator 10k"
+      manufacturer="Plotinator Labs"
+      version="$(var.PLOTINATOR_VERSION)"
+      upgradeCode="PUT-YOUR-STABLE-GUID-HERE-000000000000">
 
-    <UIRef Id="WixUI_InstallDir" />
+    <!-- MSI package metadata -->
+    <package
+        installerVersion="500"
+        platform="x64"
+        compressed="yes"
+        installScope="perMachine" />
 
-    <Directory Id="TARGETDIR" Name="SourceDir">
-      <Directory Id="ProgramFilesFolder">
-        <Directory Id="APPLICATIONFOLDER" Name="Plotinator 10k" />
-      </Directory>
-    </Directory>
+    <!-- Media container -->
+    <mediaTemplate embedCab="yes" compressionLevel="high" />
 
-    <Feature Id="MainFeature" Title="Plotinator 10k" Level="1">
-      <ComponentGroupRef Id="PlotinatorBundleComponents" />
-    </Feature>
-  </Product>
-</Wix>
+    <!-- Upgrade logic -->
+    <majorUpgrade
+        allowDowngrades="no"
+        downgradeErrorMessage="A newer version of Plotinator 10k is already installed." />
+
+    <!-- Add an application icon (used for Add/Remove Programs entry) -->
+    <icon id="AppIcon" sourceFile="plotinator.ico" />
+    <property id="ARPPRODUCTICON" value="AppIcon" />
+
+    <!-- Additional metadata -->
+    <property id="Manufacturer" value="Plotinator Labs" />
+    <summaryInformation
+        manufacturer="Plotinator Labs"
+        subject="Plotinator 10k Installer"
+        comments="Automated MSI built with WiX v6" />
+
+    <!-- UI -->
+    <uiRef id="WixUI_InstallDir" />
+    <property id="WIXUI_INSTALLDIR" value="APPLICATIONFOLDER" />
+
+    <!-- Directory structure -->
+    <directory id="TARGETDIR" name="SourceDir">
+      <directory id="ProgramFiles64Folder">
+        <directory id="APPLICATIONFOLDER" name="Plotinator 10k" />
+      </directory>
+    </directory>
+
+    <!-- Features -->
+    <feature id="MainFeature" title="Plotinator 10k" level="1">
+      <componentGroupRef id="PlotinatorBundleComponents" />
+    </feature>
+
+  </product>
+</wix>
