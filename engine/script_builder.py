@@ -298,7 +298,7 @@ def generate_gnuplot_code(
         rows = max(1, int(layout_cfg.get("rows", 1)))
         columns = max(1, int(layout_cfg.get("columns", 1)))
 
-        for idx, dataset in enumerate(datasets, start=1):
+        for _idx, dataset in enumerate(datasets, start=1):
             ds = dataset
             pane_title = None
             slot: int | None = None

@@ -3,21 +3,18 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 import queue
-import subprocess
-import sys
 import threading
 import tkinter as tk
-from typing import Any
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Any
 
 import ttkbootstrap as ttkb
 from ttkbootstrap.constants import *
 
-from engine import run_batch as engine_run_batch
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
+from engine import run_batch as engine_run_batch
 
 CONFIG_PATH = "config.json"
 
@@ -88,7 +85,7 @@ class PlotinatorApp(ttkb.Window):
             height=12,
             bootstyle="info",
         )
-        for col, width in zip(columns, (200, 260, 220, 80)):
+        for col, width in zip(columns, (200, 260, 220, 80), strict=False):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
@@ -359,7 +356,7 @@ class PlotinatorApp(ttkb.Window):
             height=6,
             bootstyle="info",
         )
-        for col, width in zip(("Label", "File", "Pane"), (200, 220, 80)):
+        for col, width in zip(("Label", "File", "Pane"), (200, 220, 80), strict=False):
             dataset_tree.heading(col, text=col)
             dataset_tree.column(col, width=width, anchor="w")
         dataset_tree.pack(side="left", fill="both", expand=True, padx=(0, 6))

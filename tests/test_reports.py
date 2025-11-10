@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from reports import markdown_builder
-from reports import pdf_exporter
+from reports import markdown_builder, pdf_exporter
 
 
 def test_load_results_reads_json(tmp_path: Path) -> None:

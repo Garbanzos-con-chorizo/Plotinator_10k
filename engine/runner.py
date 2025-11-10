@@ -8,10 +8,10 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict
 
+from config import ConfigError, JobSettings, load_config_file
 from reports.markdown_builder import write_markdown_report
 from reports.pdf_exporter import export_pdf
 
-from config import ConfigError, JobSettings, load_config_file
 from .config import normalize_plots
 from .data_pipeline import prepare_datafile
 from .script_builder import (

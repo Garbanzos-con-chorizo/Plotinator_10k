@@ -5,7 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from config import LayoutConfig, infer_parameters as _infer_parameters, load_config
+from config import LayoutConfig, load_config
+from config import infer_parameters as _infer_parameters
 
 __all__ = [
     "normalize_layout",
