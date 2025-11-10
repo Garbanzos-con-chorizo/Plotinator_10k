@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX Toolset template for bundling the Plotinator 10k PyInstaller output into an MSI.
+  - Generated component groups from Heat should be emitted to `packaging/windows/plotinator-files.wxs`
+    with the identifier `PlotinatorBundleComponents`.
+  - Inject the project version via the PLOTINATOR_VERSION preprocessor variable when compiling with Candle.
+  - Replace the placeholder UpgradeCode with a stable GUID before shipping your first release.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Plotinator 10k"
+           Manufacturer="Plotinator Labs"
+           Version="$(var.PLOTINATOR_VERSION)"
+           UpgradeCode="00000000-0000-0000-0000-000000000000">
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine" />
+
+    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Plotinator 10k is already installed." />
+
+    <Property Id="ARPPRODUCTICON" Value="plotinator-gui.exe" />
+    <Property Id="WIXUI_INSTALLDIR" Value="APPLICATIONFOLDER" />
+
+    <UIRef Id="WixUI_InstallDir" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="APPLICATIONFOLDER" Name="Plotinator 10k" />
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="Plotinator 10k" Level="1">
+      <ComponentGroupRef Id="PlotinatorBundleComponents" />
+    </Feature>
+  </Product>
+</Wix>

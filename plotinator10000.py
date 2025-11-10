@@ -2,21 +2,18 @@ from __future__ import annotations
 
 import copy
 import json
-import os
+import math
 import queue
-import subprocess
-import sys
 import threading
 import tkinter as tk
-from typing import Any
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Any
 
 import ttkbootstrap as ttkb
-from ttkbootstrap.constants import *
 
-from engine import run_job
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
+from engine import run_batch as engine_run_batch
 
 CONFIG_PATH = "config.json"
 
@@ -35,9 +32,13 @@ class PlotinatorApp(ttkb.Window):
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
         self.runner_thread: threading.Thread | None = None
+        self._stop_log = threading.Event()
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
         self._progress_completed = 0
+        self.status_var = tk.StringVar(self, value="Idle")
+        self._images: dict[str, tk.PhotoImage] = {}
+        self._load_images()
 
         self._create_widgets()
         self.tree.bind("<Double-1>", self.on_double_click)
@@ -47,39 +48,113 @@ class PlotinatorApp(ttkb.Window):
     def _create_widgets(self) -> None:
         header = ttkb.Frame(self, padding=10)
         header.pack(fill="x")
-        ttkb.Label(header, text="⚙️ Plotinator 100000", font=("Segoe UI", 22, "bold")).pack(side="left")
+        if (logo := self._images.get("icon_header")) is not None:
+            ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
+        ttkb.Label(
+            header,
+            text="⚙️ Plotinator 100000",
+            font=("Segoe UI", 22, "bold"),
+        ).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
 
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
-        for text, cmd, style in [
-            ("📂 Data Folder", self.select_folder, "info-outline"),
-            ("➕ Add Fit", self.add_fit, "success-outline"),
-            ("🗑 Delete Fit", self.delete_fit, "danger-outline"),
-            ("💾 Save Config", self.save_config, "secondary-outline"),
-            ("🚀 Run Batch", self.run_batch, "success"),
-            ("📘 Open Report", self.open_latest_report, "primary-outline"),
-        ]:
-            ttkb.Button(toolbar, text=text, command=cmd, bootstyle=style).pack(side="left", padx=4)
+        toolbar_logo = self._images.get("toolbar_button")
+        button_plan = [
+            ("Data Folder", self.select_folder, "info-outline", True),
+            ("Add Fit", self.add_fit, "success-outline", False),
+            ("Delete Fit", self.delete_fit, "danger-outline", True),
+            ("Save Config", self.save_config, "secondary-outline", False),
+            ("Run Batch", self.run_batch, "success", True),
+            ("Open Report", self.open_latest_report, "primary-outline", False),
+        ]
+        for text, cmd, style, use_logo in button_plan:
+            kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
+            if use_logo and toolbar_logo is not None:
+                kwargs.update({"image": toolbar_logo, "compound": "left", "padding": (6, 4)})
+            ttkb.Button(toolbar, **kwargs).pack(side="left", padx=4)
 
         table_frame = ttkb.Frame(self, padding=10)
         table_frame.pack(fill="both", expand=True)
         columns = ("Title", "Formula", "Datasets", "Residuals")
-        self.tree = ttkb.Treeview(table_frame, columns=columns, show="headings", height=12, bootstyle="info")
-        for col, width in zip(columns, (200, 260, 220, 80)):
+        self.tree = ttkb.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            height=12,
+            bootstyle="info",
+        )
+        for col, width in zip(columns, (200, 260, 220, 80), strict=False):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
 
         progress_frame = ttkb.Frame(self, padding=(10, 0))
         progress_frame.pack(fill="x")
-        self.progress = ttkb.Progressbar(progress_frame, mode="determinate", bootstyle="info-striped")
+        status_label = ttkb.Label(progress_frame, textvariable=self.status_var, anchor="w")
+        if (status_icon := self._images.get("toolbar_status")) is not None:
+            status_label.configure(image=status_icon, compound="left", padding=(4, 0))
+        status_label.pack(fill="x", pady=(0, 6))
+        self.progress = ttkb.Progressbar(
+            progress_frame,
+            mode="determinate",
+            bootstyle="info-striped",
+        )
         self.progress.pack(fill="x")
 
-        log_frame = ttkb.Labelframe(self, text="Batch log", padding=10)
+        log_frame = ttkb.Labelframe(self, padding=10)
+        if (log_icon := self._images.get("toolbar_log")) is not None:
+            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
+            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
+            log_frame.configure(labelwidget=log_label)
+        else:
+            log_frame.configure(text="Batch log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_text = tk.Text(log_frame, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14")
+        self.log_text = tk.Text(
+            log_frame,
+            height=10,
+            bg="#101820",
+            fg="#39FF14",
+            insertbackground="#39FF14",
+        )
         self.log_text.pack(fill="both", expand=True)
+
+    # ------------------------------------------------------------------
+    def _scale_image(self, image: tk.PhotoImage, target: int) -> tk.PhotoImage:
+        width = image.width()
+        height = image.height()
+        scale = max(width / target, height / target)
+        if scale <= 1:
+            return image
+        factor = int(math.ceil(scale))
+        return image.subsample(factor, factor)
+
+    # ------------------------------------------------------------------
+    def _load_images(self) -> None:
+        base_path = Path(__file__).resolve().parent
+        assets = {
+            "icon": base_path / "General-logo.png",
+            "toolbar": base_path / "Toolbar-noText-Logo.png",
+        }
+        for key, path in assets.items():
+            if not path.exists():
+                continue
+            try:
+                self._images[key] = tk.PhotoImage(file=path.as_posix())
+            except tk.TclError:
+                continue
+
+        icon = self._images.get("icon")
+        if icon is not None:
+            self.iconphoto(True, icon)
+            self._images["icon_header"] = self._scale_image(icon, 64)
+            self._images["icon_toast"] = self._scale_image(icon, 32)
+
+        toolbar_icon = self._images.get("toolbar")
+        if toolbar_icon is not None:
+            self._images["toolbar_button"] = self._scale_image(toolbar_icon, 28)
+            self._images["toolbar_status"] = self._scale_image(toolbar_icon, 22)
+            self._images["toolbar_log"] = self._scale_image(toolbar_icon, 48)
 
     # ------------------------------------------------------------------
     def toggle_theme(self) -> None:
@@ -99,7 +174,9 @@ class PlotinatorApp(ttkb.Window):
         try:
             self.job = load_config_file(self.config_path)
         except ConfigError as exc:
-            messagebox.showerror("Config error", str(exc))
+            error_message = f"Failed to load config: {exc}"
+            self._append_log(f"[CONFIG] {error_message}\n")
+            self.show_toast(error_message, level="error")
             self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
             return
         self.refresh_table()
@@ -116,7 +193,9 @@ class PlotinatorApp(ttkb.Window):
         try:
             self.job = load_config(mapping, base_path=self.job.base_path)
         except ConfigError as exc:
-            messagebox.showerror("Config error", str(exc))
+            error_message = f"Invalid configuration change: {exc}"
+            self._append_log(f"[CONFIG] {error_message}\n")
+            self.show_toast(error_message, level="error")
             return False
         self.refresh_table()
         return True
@@ -180,14 +259,24 @@ class PlotinatorApp(ttkb.Window):
         self._open_fit_editor(fit, index)
 
     # ------------------------------------------------------------------
-    def _open_fit_editor(self, fit: FitConfig | dict | None = None, index: int | None = None) -> None:
+    def _open_fit_editor(
+        self,
+        fit: FitConfig | dict | None = None,
+        index: int | None = None,
+    ) -> None:
         base = {
             "title": "",
             "formula": "",
             "datafile": "",
             "residuals": True,
             "color": "#1f77b4",
-            "layout": {"rows": 1, "columns": 1, "shared_x": False, "shared_y": False, "show_legend": True},
+            "layout": {
+                "rows": 1,
+                "columns": 1,
+                "shared_x": False,
+                "shared_y": False,
+                "show_legend": True,
+            },
             "datasets": [],
         }
         if isinstance(fit, FitConfig):
@@ -266,7 +355,7 @@ class PlotinatorApp(ttkb.Window):
             height=6,
             bootstyle="info",
         )
-        for col, width in zip(("Label", "File", "Pane"), (200, 220, 80)):
+        for col, width in zip(("Label", "File", "Pane"), (200, 220, 80), strict=False):
             dataset_tree.heading(col, text=col)
             dataset_tree.column(col, width=width, anchor="w")
         dataset_tree.pack(side="left", fill="both", expand=True, padx=(0, 6))
@@ -293,7 +382,11 @@ class PlotinatorApp(ttkb.Window):
                     "",
                     "end",
                     iid=str(idx),
-                    values=(ds.get("label", f"Dataset {idx + 1}"), Path(path).name, _format_pane(ds)),
+                    values=(
+                        ds.get("label", f"Dataset {idx + 1}"),
+                        Path(path).name,
+                        _format_pane(ds),
+                    ),
                 )
 
         refresh_dataset_tree()
@@ -333,9 +426,24 @@ class PlotinatorApp(ttkb.Window):
 
         button_frame = ttkb.Frame(datasets_tab)
         button_frame.pack(fill="x", pady=8)
-        ttkb.Button(button_frame, text="Add", command=add_dataset, bootstyle="success-outline").pack(side="left", padx=4)
-        ttkb.Button(button_frame, text="Edit", command=edit_dataset, bootstyle="info-outline").pack(side="left", padx=4)
-        ttkb.Button(button_frame, text="Remove", command=delete_dataset, bootstyle="danger-outline").pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Add",
+            command=add_dataset,
+            bootstyle="success-outline",
+        ).pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Edit",
+            command=edit_dataset,
+            bootstyle="info-outline",
+        ).pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Remove",
+            command=delete_dataset,
+            bootstyle="danger-outline",
+        ).pack(side="left", padx=4)
         dataset_tree.bind("<Double-1>", lambda _evt: edit_dataset())
 
         def _save() -> None:
@@ -376,7 +484,12 @@ class PlotinatorApp(ttkb.Window):
         buttons = ttkb.Frame(editor)
         buttons.pack(fill="x", pady=10)
         ttkb.Button(buttons, text="Cancel", command=editor.destroy).pack(side="right", padx=5)
-        ttkb.Button(buttons, text="Save", command=_save, bootstyle="success").pack(side="right", padx=5)
+        ttkb.Button(
+            buttons,
+            text="Save",
+            command=_save,
+            bootstyle="success",
+        ).pack(side="right", padx=5)
 
 class DatasetDialog(ttkb.Toplevel):
     def __init__(self, master: tk.Misc, dataset: dict | None = None) -> None:
@@ -398,7 +511,11 @@ class DatasetDialog(ttkb.Toplevel):
 
         ttkb.Label(self, text="Pane (name or #)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
         self.pane_entry = ttkb.Entry(self)
-        pane_value = data.get("pane") or ("" if data.get("pane_index") is None else str(data.get("pane_index")))
+        pane_value = data.get("pane") or (
+            ""
+            if data.get("pane_index") is None
+            else str(data.get("pane_index"))
+        )
         self.pane_entry.insert(0, pane_value)
         self.pane_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
 
@@ -444,7 +561,13 @@ class DatasetDialog(ttkb.Toplevel):
         self.color_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         self.color_entry.insert(0, style.get("line_color", ""))
 
-        ttkb.Label(self, text="Preprocessing (JSON list)").grid(row=6, column=0, sticky="nw", padx=10, pady=6)
+        ttkb.Label(self, text="Preprocessing (JSON list)").grid(
+            row=6,
+            column=0,
+            sticky="nw",
+            padx=10,
+            pady=6,
+        )
         self.preprocess_text = tk.Text(self, height=4, width=40)
         preprocessing = (data.get("data_source") or {}).get("preprocessing", [])
         try:
@@ -461,11 +584,29 @@ class DatasetDialog(ttkb.Toplevel):
         button_frame = ttkb.Frame(self)
         button_frame.grid(row=7, column=0, columnspan=4, sticky="e", padx=10, pady=10)
         ttkb.Button(button_frame, text="Cancel", command=self.destroy).pack(side="right", padx=5)
-        ttkb.Button(button_frame, text="Save", command=self._on_save, bootstyle="success").pack(side="right", padx=5)
+        ttkb.Button(
+            button_frame,
+            text="Save",
+            command=self._on_save,
+            bootstyle="success",
+        ).pack(side="right", padx=5)
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _on_save(self) -> None:
+        def notify(
+            message: str,
+            level: str = "error",
+            focus_widget: tk.Widget | None = None,
+        ) -> None:
+            target: tk.Misc | None = self
+            while target is not None and not hasattr(target, "show_toast"):
+                target = getattr(target, "master", None)
+            if target is not None and hasattr(target, "show_toast"):
+                target.show_toast(message, level=level)
+            if focus_widget is not None:
+                focus_widget.focus_set()
+
         label = self.label_entry.get().strip() or "Dataset"
         pane_value = self.pane_entry.get().strip()
         pane_payload: dict[str, int | str] = {}
@@ -478,11 +619,17 @@ class DatasetDialog(ttkb.Toplevel):
             pane_payload["pane_index"] = 1
 
         path = self.path_entry.get().strip()
+        x_value_raw = (self.x_spin.get() or "").strip()
+        y_value_raw = (self.y_spin.get() or "").strip()
         try:
-            x_col = int(self.x_spin.get() or 1)
-            y_col = int(self.y_spin.get() or 2)
+            x_col = int(x_value_raw or 1)
         except ValueError:
-            messagebox.showerror("Invalid input", "X and Y columns must be integers.")
+            notify("X column must be an integer.", focus_widget=self.x_spin)
+            return
+        try:
+            y_col = int(y_value_raw or 2)
+        except ValueError:
+            notify("Y column must be an integer.", focus_widget=self.y_spin)
             return
 
         error_col = self.error_entry.get().strip()
@@ -507,9 +654,9 @@ class DatasetDialog(ttkb.Toplevel):
                 if not isinstance(preprocessing, list):
                     raise ValueError
             except (json.JSONDecodeError, ValueError):
-                messagebox.showerror(
-                    "Invalid preprocessing",
+                notify(
                     "Preprocessing must be a JSON list (e.g., []).",
+                    focus_widget=self.preprocess_text,
                 )
                 return
         else:
@@ -533,7 +680,9 @@ class DatasetDialog(ttkb.Toplevel):
     # ------------------------------------------------------------------
     def run_batch(self) -> None:
         if self.runner_thread and self.runner_thread.is_alive():
-            messagebox.showinfo("Batch running", "A batch is already running")
+            info_message = "Batch already running."
+            self._append_log(f"[WARN] {info_message}\n")
+            self.show_toast(info_message, level="warning")
             return
 
         self.save_config()
@@ -541,35 +690,42 @@ class DatasetDialog(ttkb.Toplevel):
         self.log_text.delete("1.0", tk.END)
         self._progress_total = 0
         self._progress_completed = 0
+        self._stop_log.clear()
         self._event_queue = queue.Queue()
+        self._set_status("Launching batch…")
+
+        event_state = {"job_error": False}
+
+        class _BatchCancelled(Exception):
+            """Internal sentinel exception to abort the engine runner."""
+
+            pass
 
         def _push_event(event: dict[str, Any]) -> None:
+            if self._stop_log.is_set():
+                raise _BatchCancelled
             if self._event_queue is not None:
+                if event.get("type") == "job-error":
+                    event_state["job_error"] = True
                 self._event_queue.put(event)
 
         def _runner() -> None:
-            script_path = Path(__file__).resolve().with_name("plot_manager.py")
-            cmd = [sys.executable, str(script_path), str(self.config_path)]
             try:
-                process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                    cwd=self.config_path.parent,
-                )
-            except OSError as exc:
-                self._append_log(f"Failed to start {script_path}: {exc}\n")
-                return
-
-            for line in process.stdout:
-                if self._stop_log.is_set():
-                    break
-                self._append_log(line)
-            process.wait()
-            self.progress.configure(value=100)
-            self._append_log("\n[DONE] Batch finished.\n")
+                engine_run_batch(str(self.config_path), on_event=_push_event)
+            except _BatchCancelled:
+                self._append_log("[CANCELLED] Batch cancelled by user.\n")
+                self._set_status("Batch cancelled")
+            except Exception as exc:  # noqa: BLE001 - surface via events only
+                error_message = str(exc)
+                if not event_state["job_error"]:
+                    event_state["job_error"] = True
+                    if self._event_queue is not None:
+                        self._event_queue.put({"type": "job-error", "error": error_message})
+                    else:
+                        self._append_log(f"[X] {error_message}\n")
+                        self._set_status("Batch failed")
+            finally:
+                self.runner_thread = None
 
         self.runner_thread = threading.Thread(target=_runner, daemon=True)
         self.runner_thread.start()
@@ -579,15 +735,53 @@ class DatasetDialog(ttkb.Toplevel):
     def _poll_events(self) -> None:
         if self._event_queue is None:
             return
-        try:
-            while True:
-                event = self._event_queue.get_nowait()
-                self._handle_engine_event(event)
-        except queue.Empty:
-            pass
 
-        if self._event_queue is not None:
-            self.after(100, self._poll_events)
+        try:
+            event = self._event_queue.get_nowait()
+        except queue.Empty:
+            event = None
+        else:
+            self._handle_engine_event(event)
+
+        if self._event_queue is None:
+            return
+
+        if event is not None and not self._event_queue.empty():
+            self.after(0, self._poll_events)
+            return
+
+        runner = self.runner_thread
+        if (runner is None or not runner.is_alive()) and self._event_queue.empty():
+            self._event_queue = None
+            return
+
+        self.after(100, self._poll_events)
+
+    # ------------------------------------------------------------------
+    def _stop_runner_thread(self) -> None:
+        """Request cancellation of the in-process engine runner and drain events."""
+
+        self._stop_log.set()
+        thread = self.runner_thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+        self.runner_thread = None
+        queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
+        self._event_queue = None
+        if queued_events is not None:
+            try:
+                while True:
+                    event = queued_events.get_nowait()
+                    self._handle_engine_event(event)
+            except queue.Empty:
+                pass
+        self._stop_log.clear()
+
+    # ------------------------------------------------------------------
+    def stop_batch(self) -> None:
+        """Public helper for stop controls to shut down the batch thread."""
+
+        self._stop_runner_thread()
 
     # ------------------------------------------------------------------
     def _handle_engine_event(self, event: dict[str, Any]) -> None:
@@ -607,11 +801,13 @@ class DatasetDialog(ttkb.Toplevel):
             self.progress.configure(value=0)
             ts = event.get("timestamp", "")
             self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
+            self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
             return
 
         if etype == "plot-start":
             title = event.get("title", "Untitled")
             self._append_log(f"[RUN] Processing: {title}\n")
+            self._set_status(f"Processing plot: {title}")
             return
 
         if etype == "plot-complete":
@@ -619,6 +815,10 @@ class DatasetDialog(ttkb.Toplevel):
             self._update_progress_bar()
             title = event.get("title", "Untitled")
             self._append_log(f"[OK] Finished: {title}\n")
+            total_display = self._progress_total if self._progress_total else "?"
+            self._set_status(
+                f"Completed {self._progress_completed}/{total_display}: {title}"
+            )
             return
 
         if etype == "plot-error":
@@ -628,12 +828,14 @@ class DatasetDialog(ttkb.Toplevel):
             error_msg = event.get("error", "Unknown error")
             self._append_log(f"[X] Error in {title}: {error_msg}\n")
             self.show_toast(f"Plot failed: {title}", level="error")
+            self._set_status(f"Plot error: {title}")
             return
 
         if etype == "report-markdown-ready":
             md_path = event.get("markdown_path", "")
             if md_path:
                 self._append_log(f"[REPORT] Markdown saved to: {md_path}\n")
+            self._set_status("Report markdown generated")
             return
 
         if etype == "report-exported":
@@ -641,6 +843,7 @@ class DatasetDialog(ttkb.Toplevel):
             if pdf_path:
                 self._append_log(f"[REPORT] PDF exported to: {pdf_path}\n")
             self.show_toast("Report exported", level="success")
+            self._set_status("Report exported")
             return
 
         if etype == "report-error":
@@ -648,9 +851,11 @@ class DatasetDialog(ttkb.Toplevel):
             error_msg = event.get("error", "Unknown error")
             self._append_log(f"[WARN] Report {stage} failed: {error_msg}\n")
             self.show_toast("Report generation issue", level="warning")
+            self._set_status(f"Report {stage} failed")
             return
 
         if etype == "job-complete":
+            self._progress_completed = self._progress_total or self._progress_completed
             self.progress.configure(value=100)
             results_path = event.get("results_path")
             if results_path:
@@ -659,17 +864,25 @@ class DatasetDialog(ttkb.Toplevel):
             if pdf_path:
                 self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
+            self._set_status("Batch complete")
+            self._event_queue = None
             return
 
         if etype == "job-error":
             error_msg = event.get("error", "Batch failed")
             self._append_log(f"[X] {error_msg}\n")
-            messagebox.showerror("Batch failed", error_msg)
-            self.show_toast("Batch failed", level="error")
+            self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status(f"Batch failed: {error_msg}")
+            self._event_queue = None
             return
 
-        if etype == "job-thread-exit":
-            self.runner_thread = None
+        if etype == "job-exception":
+            error_msg = event.get("error", "Batch failed")
+            self._append_log(f"[X] {error_msg}\n")
+            self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status(f"Batch failed: {error_msg}")
             self._event_queue = None
             return
 
@@ -680,6 +893,13 @@ class DatasetDialog(ttkb.Toplevel):
         else:
             percent = 0.0
         self.progress.configure(value=min(percent, 100))
+
+    # ------------------------------------------------------------------
+    def _set_status(self, text: str) -> None:
+        def _apply() -> None:
+            self.status_var.set(text)
+
+        self.after(0, _apply)
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
@@ -693,11 +913,19 @@ class DatasetDialog(ttkb.Toplevel):
     def open_latest_report(self) -> None:
         outputs = Path("outputs")
         if not outputs.exists():
-            messagebox.showinfo("No outputs", "No outputs folder found yet.")
+            info_message = "Outputs folder not found yet. Run a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
             return
-        latest = max(outputs.glob("*/fit_results.json"), default=None, key=lambda p: p.stat().st_mtime)
+        latest = max(
+            outputs.glob("*/fit_results.json"),
+            default=None,
+            key=lambda p: p.stat().st_mtime,
+        )
         if not latest:
-            messagebox.showinfo("No report", "Generate a batch before opening a report.")
+            info_message = "No reports available yet. Generate a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
             return
         latest_dir = latest.parent
         pdf_report = latest_dir / "report.pdf"
@@ -727,6 +955,11 @@ class DatasetDialog(ttkb.Toplevel):
         y = self.winfo_rooty() + self.winfo_height() - 100
         toast.geometry(f"240x60+{x}+{y}")
         toast.after(2500, toast.destroy)
+
+    # ------------------------------------------------------------------
+    def destroy(self) -> None:  # type: ignore[override]
+        self._stop_runner_thread()
+        super().destroy()
 
 
 def main() -> int:

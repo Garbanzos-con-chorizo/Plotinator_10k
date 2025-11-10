@@ -63,7 +63,9 @@ def apply_preprocessing(
                 mask = mask.astype(bool)
             if mask.shape[0] != processed.shape[0]:
                 raise ValueError(
-                    f"Filter expression '{expr}' produced mask of length {mask.shape[0]}, expected {processed.shape[0]}"
+                    "Filter expression "
+                    f"'{expr}' produced mask of length {mask.shape[0]}, "
+                    f"expected {processed.shape[0]}"
                 )
             processed = processed[mask]
             applied.append(
@@ -77,7 +79,8 @@ def apply_preprocessing(
             target_idx = _column_ref_to_index(step["target"])
             if target_idx >= processed.shape[1]:
                 raise ValueError(
-                    f"Transform target column '{step['target']}' (index {target_idx+1}) is out of bounds"
+                    "Transform target column "
+                    f"'{step['target']}' (index {target_idx+1}) is out of bounds"
                 )
             try:
                 values = eval(expr, {"np": np, "math": math}, ctx)
@@ -91,7 +94,9 @@ def apply_preprocessing(
             else:
                 if values.shape[0] != processed.shape[0]:
                     raise ValueError(
-                        f"Transform expression '{expr}' produced {values.shape[0]} rows, expected {processed.shape[0]}"
+                        "Transform expression "
+                        f"'{expr}' produced {values.shape[0]} rows, "
+                        f"expected {processed.shape[0]}"
                     )
                 processed[:, target_idx] = values
             applied.append(

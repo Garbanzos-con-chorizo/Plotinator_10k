@@ -5,8 +5,8 @@ from __future__ import annotations
 from .schema import (
     ColumnMapping,
     ConfigError,
-    DataSourceConfig,
     DatasetConfig,
+    DataSourceConfig,
     FitConfig,
     JobSettings,
     LayoutConfig,

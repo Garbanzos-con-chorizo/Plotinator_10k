@@ -148,7 +148,10 @@ def generate_gnuplot_code(
 
         if include_terminal:
             lines.append(
-                f"set terminal pngcairo size 800,600 font \"{_escape(style_cfg.font_family)},{style_cfg.font_size}\""
+                (
+                    "set terminal pngcairo size 800,600 font "
+                    f"\"{_escape(style_cfg.font_family)},{style_cfg.font_size}\""
+                )
             )
 
         if include_title:
@@ -220,15 +223,23 @@ def generate_gnuplot_code(
         if key in guesses and isinstance(value, (int, float)):
             guesses[key] = float(value)
     init_lines = "\n".join([f"{p} = {guesses.get(p, 1.0)}" for p in params])
-    prints = "\n".join(
-        [
-            (
-                f'if (exists("{p}_err")) {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, {p}_err) }} '
-                f'else {{ print sprintf("PYFIT %s %0.16g %0.16g", "{p}", {p}, 0.0) }}'
-            )
-            for p in params
-        ]
-    )
+    def _format_param_print(name: str) -> str:
+        return "".join(
+            [
+                f'if (exists("{name}_err")) {{ ',
+                (
+                    'print sprintf("PYFIT %s %0.16g %0.16g", '
+                    f'"{name}", {name}, {name}_err) }} '
+                ),
+                "else { ",
+                (
+                    'print sprintf("PYFIT %s %0.16g %0.16g", '
+                    f'"{name}", {name}, 0.0) }}'
+                ),
+            ]
+        )
+
+    prints = "\n".join(_format_param_print(p) for p in params)
 
     fit_using: list[str] = []
     if x_col != 1 or y_col != 2 or err_col or weight_col:
@@ -287,7 +298,7 @@ def generate_gnuplot_code(
         rows = max(1, int(layout_cfg.get("rows", 1)))
         columns = max(1, int(layout_cfg.get("columns", 1)))
 
-        for idx, dataset in enumerate(datasets, start=1):
+        for _idx, dataset in enumerate(datasets, start=1):
             ds = dataset
             pane_title = None
             slot: int | None = None
@@ -419,12 +430,13 @@ def generate_gnuplot_code(
         )
         lines.append(f"set output \"{out_res_path}\"")
         lines.append(residual_style)
-        lines.append(
-            (
-                f"plot \"{datafile}\" using {x_col}:(column({y_col}) - f(column({x_col}))) "
-                f"with points pt {pt} title \"Residuals\", \\\n+     0 with lines notitle lc rgb \"gray\""
-            )
-        )
+        residual_plot_parts = [
+            f'plot "{datafile}" using {x_col}:(column({y_col}) - f(column({x_col})))',
+            f'with points pt {pt} title "Residuals", \\',
+            '     0 with lines notitle lc rgb "gray"',
+        ]
+        residual_plot = " ".join(residual_plot_parts[:2]) + "\n" + residual_plot_parts[2]
+        lines.append(residual_plot)
         lines.append("unset output")
 
     return "\n".join(lines)

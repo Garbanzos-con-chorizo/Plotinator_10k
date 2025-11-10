@@ -90,7 +90,11 @@ class StyleConfig:
     def from_dict(cls, raw: dict | None, *, fallback_color: str | None = None) -> "StyleConfig":
         if not isinstance(raw, dict):
             raw = {}
-        data = {field.name: raw.get(field.name) for field in cls.__dataclass_fields__.values() if field.init}
+        data = {
+            field.name: raw.get(field.name)
+            for field in cls.__dataclass_fields__.values()
+            if field.init
+        }
 
         if fallback_color and not data.get("line_color"):
             data["line_color"] = fallback_color
