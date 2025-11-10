@@ -5,8 +5,19 @@ import pytest
 import plot_manager
 
 
-@pytest.mark.parametrize("argv,expected_path", [(["plot_manager.py", "custom.json"], "custom.json"), (["plot_manager.py"], "config.json")])
-def test_main_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], argv: list[str], expected_path: str) -> None:
+@pytest.mark.parametrize(
+    "argv,expected_path",
+    [
+        (["plot_manager.py", "custom.json"], "custom.json"),
+        (["plot_manager.py"], "config.json"),
+    ],
+)
+def test_main_success(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    expected_path: str,
+) -> None:
     """plot_manager.main should delegate to run_batch and return success."""
 
     call_args: dict[str, str] = {}
@@ -25,7 +36,10 @@ def test_main_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFix
     assert captured.err == ""
 
 
-def test_main_missing_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_missing_config(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Missing configuration files should yield an error status and message."""
 
     def fake_run_batch(path: str) -> None:
@@ -41,7 +55,10 @@ def test_main_missing_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Cap
     assert "config.json" in captured.out
 
 
-def test_main_handles_unexpected_exceptions(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_main_handles_unexpected_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     """Unexpected exceptions should be surfaced with a non-zero exit code."""
 
     def fake_run_batch(_: str) -> None:
