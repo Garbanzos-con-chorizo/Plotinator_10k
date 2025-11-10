@@ -40,7 +40,8 @@ def ensure_pandoc_available() -> str:
         return which_path
 
     raise RuntimeError(
-        "Pandoc executable not found. Install Pandoc or set the PANDOC_PATH environment variable to its location."
+        "Pandoc executable not found. Install Pandoc or set the "
+        "PANDOC_PATH environment variable to its location."
     )
 
 
@@ -64,12 +65,20 @@ def export_document(
         out_path = Path(output_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    args = list(extra_args) if extra_args is not None else list(DEFAULT_EXTRA_ARGS.get(output_format, []))
+    args = (
+        list(extra_args)
+        if extra_args is not None
+        else list(DEFAULT_EXTRA_ARGS.get(output_format, []))
+    )
 
     cwd = os.getcwd()
     os.chdir(out_dir)
     try:
-        target_name = out_path.name if out_path.parent == out_dir else md_path.with_suffix(f".{output_format}").name
+        target_name = (
+            out_path.name
+            if out_path.parent == out_dir
+            else md_path.with_suffix(f".{output_format}").name
+        )
         pypandoc.convert_file(
             md_path.name,
             to=output_format,

@@ -94,7 +94,14 @@ def fake_pandoc(monkeypatch: pytest.MonkeyPatch):
         calls.append({"ensure": True})
         return "/usr/bin/pandoc"
 
-    def convert_file(source: str, *, to: str, format: str, outputfile: str, extra_args: list[str] | None = None):
+    def convert_file(
+        source: str,
+        *,
+        to: str,
+        format: str,
+        outputfile: str,
+        extra_args: list[str] | None = None,
+    ):
         calls.append(
             {
                 "source": source,
@@ -112,7 +119,9 @@ def fake_pandoc(monkeypatch: pytest.MonkeyPatch):
     return calls
 
 
-def test_export_pdf_uses_default_arguments(tmp_path: Path, fake_pandoc: list[dict[str, object]]) -> None:
+def test_export_pdf_uses_default_arguments(
+    tmp_path: Path, fake_pandoc: list[dict[str, object]]
+) -> None:
     md_path = tmp_path / "report.md"
     md_path.write_text("Hello", encoding="utf-8")
 
@@ -134,7 +143,9 @@ def test_export_pdf_uses_default_arguments(tmp_path: Path, fake_pandoc: list[dic
     assert convert_call["extra_args"] == pdf_exporter.DEFAULT_EXTRA_ARGS["pdf"]
 
 
-def test_export_pdf_respects_custom_output_path(tmp_path: Path, fake_pandoc: list[dict[str, object]]) -> None:
+def test_export_pdf_respects_custom_output_path(
+    tmp_path: Path, fake_pandoc: list[dict[str, object]]
+) -> None:
     md_path = tmp_path / "docs" / "report.md"
     md_path.parent.mkdir()
     md_path.write_text("Content", encoding="utf-8")

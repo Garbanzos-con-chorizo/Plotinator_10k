@@ -178,7 +178,8 @@ class ColumnMapping:
                 continue
             if value > column_count:
                 raise ConfigError(
-                    f"Data file '{path}' does not have column {value} required for '{context}.{label}'"
+                    "Data file "
+                    f"'{path}' does not have column {value} required for '{context}.{label}'"
                 )
 
     def to_dict(self) -> dict[str, Any]:
@@ -205,7 +206,10 @@ class LayoutConfig:
             value = {}
         data = _load_mapping(value, context=context)
         rows = _ensure_positive(_coerce_int(data.get("rows", 1), 1), field_name=f"{context}.rows")
-        cols = _ensure_positive(_coerce_int(data.get("columns", 1), 1), field_name=f"{context}.columns")
+        cols = _ensure_positive(
+            _coerce_int(data.get("columns", 1), 1),
+            field_name=f"{context}.columns",
+        )
         legend_position = data.get("legend_position")
         if legend_position is not None:
             legend_position = str(legend_position).strip() or None
@@ -261,17 +265,29 @@ class DataSourceConfig:
         preprocessing_raw = data.get("preprocessing")
         preprocessing: list[PreprocessingStep] = []
         if preprocessing_raw is not None:
-            if not isinstance(preprocessing_raw, Iterable) or isinstance(preprocessing_raw, (str, bytes, Mapping)):
+            if not isinstance(preprocessing_raw, Iterable) or isinstance(
+                preprocessing_raw,
+                (str, bytes, Mapping),
+            ):
                 raise ConfigError(f"{context}.preprocessing must be a list")
             for idx, step in enumerate(preprocessing_raw, start=1):
                 preprocessing.append(
                     PreprocessingStep.from_mapping(step, context=f"{context}.preprocessing[{idx}]")
                 )
-        return cls(path=candidate, original_path=raw_path_str, columns=columns, preprocessing=preprocessing)
+        return cls(
+            path=candidate,
+            original_path=raw_path_str,
+            columns=columns,
+            preprocessing=preprocessing,
+        )
 
     def to_dict(self, *, relative_to: Path | None = None) -> dict[str, Any]:
         path_value: str
-        if self.original_path and not Path(self.original_path).is_absolute() and relative_to is not None:
+        if (
+            self.original_path
+            and not Path(self.original_path).is_absolute()
+            and relative_to is not None
+        ):
             try:
                 path_value = os.path.relpath(self.path, relative_to)
             except ValueError:
@@ -398,7 +414,10 @@ class JobSettings:
                 output_path = (base_dir / output_path).resolve()
         max_workers = data.get("max_workers")
         if max_workers is not None:
-            max_workers = _ensure_positive(_coerce_int(max_workers, 1), field_name="settings.max_workers")
+            max_workers = _ensure_positive(
+                _coerce_int(max_workers, 1),
+                field_name="settings.max_workers",
+            )
         return cls(output_dir=output_path, max_workers=max_workers)
 
     def to_dict(self, *, relative_to: Path | None = None) -> dict[str, Any]:
@@ -425,7 +444,13 @@ class FitConfig:
     initial_parameters: dict[str, float] = field(default_factory=dict)
 
     @classmethod
-    def from_mapping(cls, value: Any, *, base_dir: Path, base_style: StyleConfig | None = None) -> "FitConfig":
+    def from_mapping(
+        cls,
+        value: Any,
+        *,
+        base_dir: Path,
+        base_style: StyleConfig | None = None,
+    ) -> "FitConfig":
         data = _load_mapping(value, context="fit")
         title = str(data.get("title") or "Untitled")
         formula = str(data.get("formula") or data.get("fit_formula") or "a*x + b")
@@ -444,7 +469,10 @@ class FitConfig:
                 _apply_style_overrides(style_model, overrides)
         datasets_raw = data.get("datasets")
         datasets: list[DatasetConfig] = []
-        if isinstance(datasets_raw, Iterable) and not isinstance(datasets_raw, (str, bytes, Mapping)):
+        if isinstance(datasets_raw, Iterable) and not isinstance(
+            datasets_raw,
+            (str, bytes, Mapping),
+        ):
             for idx, ds_raw in enumerate(datasets_raw, start=1):
                 datasets.append(
                     DatasetConfig.from_mapping(
