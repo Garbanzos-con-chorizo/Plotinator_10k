@@ -119,7 +119,7 @@ Each layer communicates through clear interfaces:
    - Run `pyinstaller packaging/plotinator.spec --clean --noconfirm` to produce the CLI, GUI, and report executables under
      `dist/plotinator-bundle`. Smoke-test `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` in place to
      ensure they launch and detect the bundled `external/` dependencies.
-   - Harvest the bundle with the WiX Toolset using the assets under `packaging/windows/` and create the MSI as documented in the
+   - Harvest the bundle with the WiX Toolset 6 using the assets under `packaging/windows/` and create the MSI as documented in the
      [Installer Guide](docs/INSTALLER.md). Install the MSI on a clean VM to verify the GUI can run a sample batch and export a PDF
      report.
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).

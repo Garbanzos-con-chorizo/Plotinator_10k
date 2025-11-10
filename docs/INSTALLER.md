@@ -29,8 +29,8 @@ Windows machine so that native dependencies are captured correctly.
    python -m pip install .[yaml]
    python -m pip install pyinstaller pyinstaller-hooks-contrib
    ```
-4. **WiX Toolset** – Download WiX 3.14+ and either add `%WIX%\bin` to `PATH` or reference the absolute binary paths when running
-   `heat.exe`, `candle.exe`, and `light.exe`.
+4. **WiX Toolset 6.0** – Install the WiX v6 toolset so that `wix.exe` is available on your `PATH` (or reference the absolute path
+   to `wix.exe` when invoking the `wix` CLI subcommands).
 
 ## 2. Build the PyInstaller bundle
 
@@ -61,36 +61,29 @@ helper) in a single folder.
 MSI authoring assets live under `packaging/windows/`. The folder contains a WiX template (`plotinator.wxs`) and documentation for
 collecting files from the PyInstaller bundle.
 
-1. **Harvest** the PyInstaller output into a component description using WiX `heat`:
+1. **Harvest** the PyInstaller output into a component description using the WiX v6 CLI:
    ```powershell
    $bundle = Resolve-Path dist/plotinator-bundle
    New-Item -ItemType Directory -Force -Path packaging/windows/build | Out-Null
-   heat dir $bundle `
-     -dr APPLICATIONFOLDER `
-     -cg PlotinatorBundleComponents `
-     -gg `
-     -sfrag `
-     -srd `
+   wix harvest dir $bundle `
+     -id PlotinatorBundleComponents `
+     -ext WixToolset.Heat.wixext `
      -out packaging/windows/build/plotinator-files.wxs
    ```
    The generated file is referenced by the template via `<ComponentGroupRef Id="PlotinatorBundleComponents" />`.
-2. **Compile** the WiX sources with the correct version metadata:
+2. **Build** the WiX sources with the correct version metadata:
    ```powershell
    $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
    $wixOut = Resolve-Path packaging/windows/build
-   candle packaging/windows/plotinator.wxs $wixOut/plotinator-files.wxs `
-     -dPLOTINATOR_VERSION=$version `
-     -out $wixOut/
+   wix build `
+     packaging/windows/plotinator.wxs `
+     $wixOut/plotinator-files.wxs `
+     -ext WixToolset.UI.wixext `
+     -out dist/Plotinator_OpenBeta-$version.msi `
+     -dPLOTINATOR_VERSION=$version
    ```
    Replace the placeholder `UpgradeCode` in `plotinator.wxs` with a stable GUID before the first production release.
-3. **Link** the compiled objects into a distributable MSI:
-   ```powershell
-   light $wixOut/plotinator.wixobj $wixOut/plotinator-files.wixobj `
-     -ext WixUIExtension `
-     -cultures:en-us `
-     -o dist/Plotinator_OpenBeta-$version.msi
-   ```
-4. **Verify** the installer on a clean Windows environment:
+3. **Verify** the installer on a clean Windows environment:
    - Run the MSI and choose the default installation directory.
    - Confirm the binaries are placed under `Program Files\Plotinator Open Beta`.
    - Launch the installed `Plotinator Open Beta GUI` shortcut and trigger a sample batch run using the bundled `data\` files.
@@ -103,7 +96,7 @@ collecting files from the PyInstaller bundle.
 | `gnuplot` invocation fails or plots are missing after installation | `gnuplot` was absent when PyInstaller ran, so the executable was not copied into `external/` | Install `gnuplot`, update `GNUPLOT_PATH`, delete `build/` and `dist/`, then rebuild the PyInstaller bundle. |
 | PDF export crashes with `pandoc: command not found` | `pandoc` or `wkhtmltopdf` were missing when PyInstaller executed | Install both tools, set the corresponding environment variables, and rebuild so the binaries appear in `external/`. |
 | PyInstaller build log reports missing modules such as `plot_manager` | Hidden imports were not collected | Use the provided `packaging/plotinator.spec`; it already collects the `engine`, `config`, `plotinator`, and `reports` packages. Delete previous build artefacts before retrying. |
-| `light.exe` fails with `LGHT0103` (file not found) | Incorrect path to the harvested WiX file or WiX binaries | Ensure `%WIX%` is configured or invoke `heat`, `candle`, and `light` with absolute paths. Verify `packaging/windows/build/plotinator-files.wxs` exists. |
+| `wix build` fails with `LGHT0103` (file not found) | Incorrect path to the harvested WiX file or WiX binaries | Ensure WiX v6 is installed and that you call `wix` with absolute paths if it is not on `PATH`. Verify `packaging/windows/build/plotinator-files.wxs` exists. |
 | Installer launches but the app immediately exits | Missing Visual C++ runtime on the target machine | Install the [Microsoft Visual C++ Redistributable for VS 2015-2022](https://aka.ms/vs/17/release/vc_redist.x64.exe) before running Plotinator. |
 
 Once the MSI passes validation, publish both the zipped `dist/plotinator-bundle` folder and the `dist/Plotinator_OpenBeta-<version>.msi` package to your distribution channel.
