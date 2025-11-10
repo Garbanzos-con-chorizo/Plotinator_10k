@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  WiX v6 schema version of the Plotinator 10k installer definition.
+  WiX v6 schema version of the Plotinator Open Beta v1.0 installer definition.
   Build example:
-      wix build Product.wxs plotinator-files.wxs ^
+      wix build plotinator.wxs plotinator-files.wxs ^
            -ext WixToolset.UI.wixext ^
-           -out ..\..\dist\Plotinator_10k.msi ^
+           -out ..\..\dist\Plotinator_OpenBeta.msi ^
            -dPLOTINATOR_VERSION=1.0.0
 -->
 
@@ -12,7 +12,7 @@
 
   <product
       id="*"
-      name="Plotinator 10k"
+      name="Plotinator Open Beta"
       manufacturer="Plotinator Labs"
       version="$(var.PLOTINATOR_VERSION)"
       upgradeCode="PUT-YOUR-STABLE-GUID-HERE-000000000000">
@@ -30,7 +30,7 @@
     <!-- Upgrade logic -->
     <majorUpgrade
         allowDowngrades="no"
-        downgradeErrorMessage="A newer version of Plotinator 10k is already installed." />
+        downgradeErrorMessage="A newer version of Plotinator Open Beta is already installed." />
 
     <!-- Add an application icon (used for Add/Remove Programs entry) -->
     <icon id="AppIcon" sourceFile="plotinator.ico" />
@@ -40,7 +40,7 @@
     <property id="Manufacturer" value="Plotinator Labs" />
     <summaryInformation
         manufacturer="Plotinator Labs"
-        subject="Plotinator 10k Installer"
+        subject="Plotinator Open Beta Installer"
         comments="Automated MSI built with WiX v6" />
 
     <!-- UI -->
@@ -50,12 +50,12 @@
     <!-- Directory structure -->
     <directory id="TARGETDIR" name="SourceDir">
       <directory id="ProgramFiles64Folder">
-        <directory id="APPLICATIONFOLDER" name="Plotinator 10k" />
+        <directory id="APPLICATIONFOLDER" name="Plotinator Open Beta" />
       </directory>
     </directory>
 
     <!-- Features -->
-    <feature id="MainFeature" title="Plotinator 10k" level="1">
+    <feature id="MainFeature" title="Plotinator Open Beta" level="1">
       <componentGroupRef id="PlotinatorBundleComponents" />
     </feature>
 

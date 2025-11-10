@@ -1,6 +1,6 @@
-# Plotinator 10k Installer Guide
+# Plotinator Open Beta v1.0 Installer Guide
 
-This guide describes how to freeze the Plotinator 10k toolkit with [PyInstaller](https://pyinstaller.org/) and how to wrap the
+This guide describes how to freeze the Plotinator Open Beta v1.0 toolkit with [PyInstaller](https://pyinstaller.org/) and how to wrap the
 resulting bundle in a Windows `.msi` installer using the [WiX Toolset](https://wixtoolset.org/). Follow the steps in order on a
 Windows machine so that native dependencies are captured correctly.
 
@@ -88,13 +88,13 @@ collecting files from the PyInstaller bundle.
    light $wixOut/plotinator.wixobj $wixOut/plotinator-files.wixobj `
      -ext WixUIExtension `
      -cultures:en-us `
-     -o dist/plotinator-$version.msi
+     -o dist/Plotinator_OpenBeta-$version.msi
    ```
 4. **Verify** the installer on a clean Windows environment:
    - Run the MSI and choose the default installation directory.
-   - Confirm the binaries are placed under `Program Files\Plotinator 10k`.
-   - Launch the installed `Plotinator GUI` shortcut and trigger a sample batch run using the bundled `data\` files.
-   - Generate a PDF report via `Plotinator Report Helper` to ensure `pandoc`/`wkhtmltopdf` were correctly captured.
+   - Confirm the binaries are placed under `Program Files\Plotinator Open Beta`.
+   - Launch the installed `Plotinator Open Beta GUI` shortcut and trigger a sample batch run using the bundled `data\` files.
+   - Generate a PDF report via `Plotinator Open Beta Report Helper` to ensure `pandoc`/`wkhtmltopdf` were correctly captured.
 
 ## 4. Packaging Troubleshooting
 
@@ -106,4 +106,4 @@ collecting files from the PyInstaller bundle.
 | `light.exe` fails with `LGHT0103` (file not found) | Incorrect path to the harvested WiX file or WiX binaries | Ensure `%WIX%` is configured or invoke `heat`, `candle`, and `light` with absolute paths. Verify `packaging/windows/build/plotinator-files.wxs` exists. |
 | Installer launches but the app immediately exits | Missing Visual C++ runtime on the target machine | Install the [Microsoft Visual C++ Redistributable for VS 2015-2022](https://aka.ms/vs/17/release/vc_redist.x64.exe) before running Plotinator. |
 
-Once the MSI passes validation, publish both the zipped `dist/plotinator-bundle` folder and the MSI to your distribution channel.
+Once the MSI passes validation, publish both the zipped `dist/plotinator-bundle` folder and the `dist/Plotinator_OpenBeta-<version>.msi` package to your distribution channel.

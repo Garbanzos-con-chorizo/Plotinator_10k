@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller build specification for Plotinator 10k multi-entry executables."""
+"""PyInstaller build specification for Plotinator Open Beta v1.0 multi-entry executables."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ _add_binary(os.environ.get("WKHTMLTOPDF_PATH") or shutil.which("wkhtmltopdf"))
 
 
 cli_script = ROOT / "plot_manager.py"
-gui_script = ROOT / "plotinator10000.py"
+gui_script = ROOT / "plotinator_gui.py"
 report_script = ROOT / "generate_pdf.py"
 
 
