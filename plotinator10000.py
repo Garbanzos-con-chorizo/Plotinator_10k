@@ -54,7 +54,11 @@ class PlotinatorApp(ttkb.Window):
         header.pack(fill="x")
         if (logo := self._images.get("icon_header")) is not None:
             ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
-        ttkb.Label(header, text="⚙️ Plotinator 100000", font=("Segoe UI", 22, "bold")).pack(side="left")
+        ttkb.Label(
+            header,
+            text="⚙️ Plotinator 100000",
+            font=("Segoe UI", 22, "bold"),
+        ).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
 
         toolbar = ttkb.Frame(self, padding=10)
@@ -77,7 +81,13 @@ class PlotinatorApp(ttkb.Window):
         table_frame = ttkb.Frame(self, padding=10)
         table_frame.pack(fill="both", expand=True)
         columns = ("Title", "Formula", "Datasets", "Residuals")
-        self.tree = ttkb.Treeview(table_frame, columns=columns, show="headings", height=12, bootstyle="info")
+        self.tree = ttkb.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            height=12,
+            bootstyle="info",
+        )
         for col, width in zip(columns, (200, 260, 220, 80)):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
@@ -89,7 +99,11 @@ class PlotinatorApp(ttkb.Window):
         if (status_icon := self._images.get("toolbar_status")) is not None:
             status_label.configure(image=status_icon, compound="left", padding=(4, 0))
         status_label.pack(fill="x", pady=(0, 6))
-        self.progress = ttkb.Progressbar(progress_frame, mode="determinate", bootstyle="info-striped")
+        self.progress = ttkb.Progressbar(
+            progress_frame,
+            mode="determinate",
+            bootstyle="info-striped",
+        )
         self.progress.pack(fill="x")
 
         log_frame = ttkb.Labelframe(self, padding=10)
@@ -100,7 +114,13 @@ class PlotinatorApp(ttkb.Window):
         else:
             log_frame.configure(text="Batch log")
         log_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_text = tk.Text(log_frame, height=10, bg="#101820", fg="#39FF14", insertbackground="#39FF14")
+        self.log_text = tk.Text(
+            log_frame,
+            height=10,
+            bg="#101820",
+            fg="#39FF14",
+            insertbackground="#39FF14",
+        )
         self.log_text.pack(fill="both", expand=True)
 
     # ------------------------------------------------------------------
@@ -243,14 +263,24 @@ class PlotinatorApp(ttkb.Window):
         self._open_fit_editor(fit, index)
 
     # ------------------------------------------------------------------
-    def _open_fit_editor(self, fit: FitConfig | dict | None = None, index: int | None = None) -> None:
+    def _open_fit_editor(
+        self,
+        fit: FitConfig | dict | None = None,
+        index: int | None = None,
+    ) -> None:
         base = {
             "title": "",
             "formula": "",
             "datafile": "",
             "residuals": True,
             "color": "#1f77b4",
-            "layout": {"rows": 1, "columns": 1, "shared_x": False, "shared_y": False, "show_legend": True},
+            "layout": {
+                "rows": 1,
+                "columns": 1,
+                "shared_x": False,
+                "shared_y": False,
+                "show_legend": True,
+            },
             "datasets": [],
         }
         if isinstance(fit, FitConfig):
@@ -356,7 +386,11 @@ class PlotinatorApp(ttkb.Window):
                     "",
                     "end",
                     iid=str(idx),
-                    values=(ds.get("label", f"Dataset {idx + 1}"), Path(path).name, _format_pane(ds)),
+                    values=(
+                        ds.get("label", f"Dataset {idx + 1}"),
+                        Path(path).name,
+                        _format_pane(ds),
+                    ),
                 )
 
         refresh_dataset_tree()
@@ -396,9 +430,24 @@ class PlotinatorApp(ttkb.Window):
 
         button_frame = ttkb.Frame(datasets_tab)
         button_frame.pack(fill="x", pady=8)
-        ttkb.Button(button_frame, text="Add", command=add_dataset, bootstyle="success-outline").pack(side="left", padx=4)
-        ttkb.Button(button_frame, text="Edit", command=edit_dataset, bootstyle="info-outline").pack(side="left", padx=4)
-        ttkb.Button(button_frame, text="Remove", command=delete_dataset, bootstyle="danger-outline").pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Add",
+            command=add_dataset,
+            bootstyle="success-outline",
+        ).pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Edit",
+            command=edit_dataset,
+            bootstyle="info-outline",
+        ).pack(side="left", padx=4)
+        ttkb.Button(
+            button_frame,
+            text="Remove",
+            command=delete_dataset,
+            bootstyle="danger-outline",
+        ).pack(side="left", padx=4)
         dataset_tree.bind("<Double-1>", lambda _evt: edit_dataset())
 
         def _save() -> None:
@@ -439,7 +488,12 @@ class PlotinatorApp(ttkb.Window):
         buttons = ttkb.Frame(editor)
         buttons.pack(fill="x", pady=10)
         ttkb.Button(buttons, text="Cancel", command=editor.destroy).pack(side="right", padx=5)
-        ttkb.Button(buttons, text="Save", command=_save, bootstyle="success").pack(side="right", padx=5)
+        ttkb.Button(
+            buttons,
+            text="Save",
+            command=_save,
+            bootstyle="success",
+        ).pack(side="right", padx=5)
 
 class DatasetDialog(ttkb.Toplevel):
     def __init__(self, master: tk.Misc, dataset: dict | None = None) -> None:
@@ -461,7 +515,11 @@ class DatasetDialog(ttkb.Toplevel):
 
         ttkb.Label(self, text="Pane (name or #)").grid(row=1, column=0, sticky="w", padx=10, pady=6)
         self.pane_entry = ttkb.Entry(self)
-        pane_value = data.get("pane") or ("" if data.get("pane_index") is None else str(data.get("pane_index")))
+        pane_value = data.get("pane") or (
+            ""
+            if data.get("pane_index") is None
+            else str(data.get("pane_index"))
+        )
         self.pane_entry.insert(0, pane_value)
         self.pane_entry.grid(row=1, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
 
@@ -507,7 +565,13 @@ class DatasetDialog(ttkb.Toplevel):
         self.color_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         self.color_entry.insert(0, style.get("line_color", ""))
 
-        ttkb.Label(self, text="Preprocessing (JSON list)").grid(row=6, column=0, sticky="nw", padx=10, pady=6)
+        ttkb.Label(self, text="Preprocessing (JSON list)").grid(
+            row=6,
+            column=0,
+            sticky="nw",
+            padx=10,
+            pady=6,
+        )
         self.preprocess_text = tk.Text(self, height=4, width=40)
         preprocessing = (data.get("data_source") or {}).get("preprocessing", [])
         try:
@@ -524,12 +588,21 @@ class DatasetDialog(ttkb.Toplevel):
         button_frame = ttkb.Frame(self)
         button_frame.grid(row=7, column=0, columnspan=4, sticky="e", padx=10, pady=10)
         ttkb.Button(button_frame, text="Cancel", command=self.destroy).pack(side="right", padx=5)
-        ttkb.Button(button_frame, text="Save", command=self._on_save, bootstyle="success").pack(side="right", padx=5)
+        ttkb.Button(
+            button_frame,
+            text="Save",
+            command=self._on_save,
+            bootstyle="success",
+        ).pack(side="right", padx=5)
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
     def _on_save(self) -> None:
-        def notify(message: str, level: str = "error", focus_widget: tk.Widget | None = None) -> None:
+        def notify(
+            message: str,
+            level: str = "error",
+            focus_widget: tk.Widget | None = None,
+        ) -> None:
             target: tk.Misc | None = self
             while target is not None and not hasattr(target, "show_toast"):
                 target = getattr(target, "master", None)
@@ -585,7 +658,10 @@ class DatasetDialog(ttkb.Toplevel):
                 if not isinstance(preprocessing, list):
                     raise ValueError
             except (json.JSONDecodeError, ValueError):
-                notify("Preprocessing must be a JSON list (e.g., []).", focus_widget=self.preprocess_text)
+                notify(
+                    "Preprocessing must be a JSON list (e.g., []).",
+                    focus_widget=self.preprocess_text,
+                )
                 return
         else:
             preprocessing = []
@@ -845,7 +921,11 @@ class DatasetDialog(ttkb.Toplevel):
             self._append_log(f"[REPORT] {info_message}\n")
             self.show_toast(info_message, level="info")
             return
-        latest = max(outputs.glob("*/fit_results.json"), default=None, key=lambda p: p.stat().st_mtime)
+        latest = max(
+            outputs.glob("*/fit_results.json"),
+            default=None,
+            key=lambda p: p.stat().st_mtime,
+        )
         if not latest:
             info_message = "No reports available yet. Generate a batch first."
             self._append_log(f"[REPORT] {info_message}\n")
