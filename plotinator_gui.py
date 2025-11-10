@@ -23,7 +23,7 @@ class PlotinatorApp(ttkb.Window):
 
     def __init__(self) -> None:
         super().__init__(themename="superhero")
-        self.title("Plotinator 100000")
+        self.title("Plotinator Open Beta v1.0")
         self.geometry("1200x800")
         self.resizable(True, True)
 
@@ -52,7 +52,7 @@ class PlotinatorApp(ttkb.Window):
             ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
         ttkb.Label(
             header,
-            text="⚙️ Plotinator 100000",
+            text="⚙️ Plotinator Open Beta v1.0",
             font=("Segoe UI", 22, "bold"),
         ).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)

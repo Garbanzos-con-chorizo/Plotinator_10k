@@ -35,9 +35,9 @@ This folder contains helper assets for turning the PyInstaller output into a Win
    light packaging/windows/build/plotinator.wixobj packaging/windows/build/plotinator-files.wixobj `
      -ext WixUIExtension `
      -cultures:en-us `
-     -o dist/plotinator-$version.msi
+     -o dist/Plotinator_OpenBeta-$version.msi
    ```
 4. **Verify the installer** by running it on a clean Windows VM and checking that the CLI, GUI, and
-   report helpers launch from `Program Files\Plotinator 10k` without missing dependency errors.
+   report helpers launch from `Program Files\Plotinator Open Beta` without missing dependency errors.
 
 For a fuller walkthrough that includes environment setup and validation steps, see `docs/INSTALLER.md`.

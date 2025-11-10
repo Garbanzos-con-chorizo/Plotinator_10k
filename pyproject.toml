@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "plotinator-10k"
-version = "0.1.0"
-description = "Batch plotting, reporting, and GUI tooling for gnuplot-driven curve fits"
+name = "plotinator-open-beta"
+version = "1.0.0b1"
+description = "Open beta release of the Plotinator toolkit for gnuplot-driven curve fits"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
@@ -41,7 +41,7 @@ Repository = "https://github.com/plotinator-labs/Plotinator_10k"
 
 [project.scripts]
 plotinator-cli = "plot_manager:main"
-plotinator-gui = "plotinator10000:main"
+plotinator-gui = "plotinator_gui:main"
 plotinator-report = "generate_pdf:main"
 
 [tool.setuptools.packages.find]
@@ -55,7 +55,7 @@ include = [
 [tool.setuptools]
 py-modules = [
     "plot_manager",
-    "plotinator10000",
+    "plotinator_gui",
     "generate_pdf",
 ]
 
