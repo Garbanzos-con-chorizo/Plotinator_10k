@@ -59,7 +59,7 @@ py-modules = [
     "generate_pdf",
 ]
 
-[tool.ruff]
+[tool.ruff.lint]
 select = ["E", "F", "I", "B"]
 line-length = 120
 

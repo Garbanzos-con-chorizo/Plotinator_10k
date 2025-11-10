@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox
 from typing import Any
 
 import ttkbootstrap as ttkb
-from ttkbootstrap.constants import *
+from ttkbootstrap.constants import CENTER, LEFT, RIGHT, END, BOTH, X, Y, YES, NO, TOP, BOTTOM
 
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 from engine import run_batch as engine_run_batch
