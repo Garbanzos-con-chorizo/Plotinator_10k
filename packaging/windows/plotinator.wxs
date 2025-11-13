@@ -1,22 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
-     xmlns:ui="http://schemas.microsoft.com/wix/2006/ui">
-
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product
       Id="*"
       Name="Plotinator 10k"
-      Manufacturer="Plotinator Labs"
+      Language="1033"
       Version="$(var.PLOTINATOR_VERSION)"
-      UpgradeCode="A1C3D9E4-5B27-41F8-9C71-2F91BBAC7E54"
-      Language = "1033">
+      Manufacturer="Plotinator Labs"
+      UpgradeCode="A1C3D9E4-5B27-41F8-9C71-2F91BBAC7E54">
 
     <Package
         InstallerVersion="500"
-        Platform="x64"
         Compressed="yes"
         InstallScope="perMachine" />
 
-    <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+    <MediaTemplate EmbedCab="yes" />
 
     <MajorUpgrade
         AllowDowngrades="no"
@@ -37,6 +34,5 @@
     <Feature Id="MainFeature" Title="Plotinator 10k" Level="1">
       <ComponentGroupRef Id="PlotinatorFiles" />
     </Feature>
-
   </Product>
 </Wix>

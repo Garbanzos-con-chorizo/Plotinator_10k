@@ -1,4 +1,4 @@
-"""Top-level package metadata for Plotinator 10k."""
+"""Top-level package metadata for Plotinator Open Beta v1.0."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 __all__ = ["__version__"]
 
 try:
-    __version__ = _metadata.version("plotinator-10k")
+    __version__ = _metadata.version("plotinator-open-beta")
 except _metadata.PackageNotFoundError:  # pragma: no cover - fallback for local runs
     _fallback = "0.0.0"
     pyproject_path = Path(__file__).resolve().parent.parent / "pyproject.toml"

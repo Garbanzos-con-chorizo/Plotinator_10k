@@ -1,6 +1,6 @@
-# Plotinator 10k
+# Plotinator Open Beta v1.0
 
-Plotinator 10k is a modular automation toolkit for producing high-quality fitting plots from
+Plotinator Open Beta v1.0 is a modular automation toolkit for producing high-quality fitting plots from
 large batches of experimental datasets. The stack now ships as a Python package with separate
 layers for configuration, execution, user interface, and reporting so each surface can evolve
 independently.
@@ -12,12 +12,18 @@ independently.
 - **Modular engine** – The `engine` package prepares datasets, generates gnuplot scripts, performs
   fits, and aggregates metrics. A thin CLI wrapper keeps scripting simple while enabling programmatic
   reuse.
-- **Desktop GUI** – `plotinator10000.py` provides a ttkbootstrap-powered editor that loads the schema
+- **Desktop GUI** – `plotinator_gui.py` provides a ttkbootstrap-powered editor that loads the schema
   models directly, helping non-technical users manage fits and launch batches without touching JSON.
 - **Reporting pipeline** – `generate_pdf.py` converts engine output into Markdown and PDF artefacts via
   Pandoc, producing narrative-ready reports after each batch run.
 
 ## Installation
+
+```bash
+pip install plotinator-open-beta
+```
+
+To work from a local checkout:
 
 ```bash
 pip install .
@@ -74,7 +80,7 @@ Plotinator_10k/
 ├── config/                 # Schema models, validation helpers, serialization utilities
 ├── plotinator/             # Package metadata and shared configuration helpers
 ├── plot_manager.py         # CLI entry point that wraps the engine
-├── plotinator10000.py      # ttkbootstrap GUI shell using the schema + engine API
+├── plotinator_gui.py       # ttkbootstrap GUI shell using the schema + engine API
 ├── generate_pdf.py         # Markdown/PDF report pipeline
 ├── config.json             # Example configuration demonstrating multi-dataset fits
 └── outputs/                # Generated artefacts (plots, residuals, reports)
@@ -113,32 +119,32 @@ Each layer communicates through clear interfaces:
    - Run `pyinstaller packaging/plotinator.spec --clean --noconfirm` to produce the CLI, GUI, and report executables under
      `dist/plotinator-bundle`. Smoke-test `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` in place to
      ensure they launch and detect the bundled `external/` dependencies.
-   - Harvest the bundle with the WiX Toolset using the assets under `packaging/windows/` and create the MSI as documented in the
+   - Harvest the bundle with the WiX Toolset 6 using the assets under `packaging/windows/` and create the MSI as documented in the
      [Installer Guide](docs/INSTALLER.md). Install the MSI on a clean VM to verify the GUI can run a sample batch and export a PDF
      report.
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).
 
-### Beta build retrieval & validation
+### Open beta build retrieval & validation
 
 Tagged builds trigger the **Windows release packaging** workflow, which publishes two artefacts
 under the run's *Artifacts* panel:
 
 - `plotinator-bundle-<tag>` – zipped PyInstaller output from `dist/plotinator-bundle/`.
-- `plotinator-msi-<tag>` – the WiX-generated installer from `dist/`.
+- `plotinator-open-beta-<tag>` – the WiX-generated installer from `dist/`.
 
 To download them, either use the GitHub web UI or fetch via the CLI:
 
 ```bash
 gh run download --repo <org>/Plotinator_10k --name plotinator-bundle-<tag>
-gh run download --repo <org>/Plotinator_10k --name plotinator-msi-<tag>
+gh run download --repo <org>/Plotinator_10k --name plotinator-open-beta-<tag>
 ```
 
 Validate the artefacts before handing them to external testers:
 
 1. Verify file integrity on Windows by computing hashes and comparing against the workflow summary.
    ```powershell
-   Get-FileHash .\plotinator-bundle-<tag>.zip -Algorithm SHA256
-   Get-FileHash .\plotinator-<tag>.msi -Algorithm SHA256
+    Get-FileHash .\plotinator-bundle-<tag>.zip -Algorithm SHA256
+    Get-FileHash .\Plotinator_OpenBeta-<tag>.msi -Algorithm SHA256
    ```
 2. Provision a clean Windows VM (no cached dependencies) and extract the bundle.
    - Launch `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` to ensure the
@@ -156,5 +162,5 @@ Common packaging failures and how to recover are documented in the [Installer Gu
 
 ## License
 
-Plotinator 10k is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for
+Plotinator Open Beta v1.0 is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for
 additional details.
