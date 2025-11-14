@@ -52,15 +52,15 @@ jobs:
         python -m pip install --upgrade pip
         pip install .
         pip install pyinstaller
-    - name: Install WiX Toolset 3.14
+    - name: Install WiX Toolset 3.11
       shell: pwsh
       run: |
-        $wixInstaller = "$env:TEMP\\wix314.exe"
-        Invoke-WebRequest -Uri "https://wixtoolset.org/releases/v3.14.0.6526/wix314.exe" -OutFile $wixInstaller
+        $wixInstaller = "$env:TEMP\\wix311.exe"
+        Invoke-WebRequest -Uri "https://wixtoolset.org/releases/v3.11.2.4516/wix311.exe" -OutFile $wixInstaller
         Start-Process -FilePath $wixInstaller -ArgumentList "/quiet" -NoNewWindow -Wait
-        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.14\\bin"
+        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
         if (!(Test-Path $wixBin)) {
-          throw "WiX Toolset v3.14 not installed at $wixBin"
+          throw "WiX Toolset v3.11 not installed at $wixBin"
         }
         $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     - name: Build PyInstaller bundle
@@ -71,14 +71,14 @@ jobs:
       shell: pwsh
       run: |
         $bundle = Resolve-Path dist/plotinator-bundle
-        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.14\\bin"
+        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
         & "$wixBin\\heat.exe" dir $bundle `
           -nologo `
           -cg PlotinatorFiles `
           -dr INSTALLFOLDER `
           -sreg -sfrag -scom -srd `
           -out packaging/windows/plotinator-files.wxs
-    - name: Build MSI with WiX 3.14 script
+    - name: Build MSI with WiX 3.11 script
       shell: pwsh
       run: |
         $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()

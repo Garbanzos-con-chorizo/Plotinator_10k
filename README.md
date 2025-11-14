@@ -119,7 +119,7 @@ Each layer communicates through clear interfaces:
    - Run `pyinstaller packaging/plotinator.spec --clean --noconfirm` to produce the CLI, GUI, and report executables under
      `dist/plotinator-bundle`. Smoke-test `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` in place to
      ensure they launch and detect the bundled `external/` dependencies.
-   - Regenerate `packaging/windows/plotinator-files.wxs` with WiX 3.14 `heat.exe`, then run `packaging/windows/build-installer.bat`
+  - Regenerate `packaging/windows/plotinator-files.wxs` with WiX 3.11 `heat.exe`, then run `packaging/windows/build-installer.bat`
      to produce `dist/Plotinator_10k.msi`. The [Installer Guide](docs/INSTALLER.md) mirrors the exact commands. Install the MSI on
      a clean VM to verify the GUI can run a sample batch and export a PDF report.
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).

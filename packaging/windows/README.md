@@ -4,16 +4,16 @@ This folder contains the WiX sources and helper script required to turn the
 PyInstaller output into a repeatable MSI installer on **any** Windows machine.
 Follow the steps below without deviation to avoid schema or toolchain issues.
 
-## 1. Install WiX 3.14
+## 1. Install WiX 3.11
 
-Only WiX Toolset **v3.14.0.6526** works with the current authoring. Later
+Only WiX Toolset **v3.11.2.4516** works with the current authoring. Later
 versions (v4/v6) use incompatible schemas and will not build this project.
 Download and install:
 
-<https://wixtoolset.org/releases/v3.14.0.6526/wix314.exe>
+<https://wixtoolset.org/releases/v3.11.2.4516/wix311.exe>
 
 The installer places the binaries under
-`C:\Program Files (x86)\WiX Toolset v3.14\bin`. The batch script assumes this
+`C:\Program Files (x86)\WiX Toolset v3.11\bin`. The batch script assumes this
 exact path.
 
 ## 2. Prepare the repository layout
@@ -50,7 +50,7 @@ From `packaging/windows/`, run the provided batch script:
 build-installer.bat
 ```
 
-The script compiles `plotinator.wxs` and `plotinator-files.wxs` with WiX 3.14
+The script compiles `plotinator.wxs` and `plotinator-files.wxs` with WiX 3.11
 (`candle.exe` + `light.exe`) and writes `dist/Plotinator_10k.msi`. The default
 version embedded in the MSI is `1.0.0`; adjust `PRODUCT_VERSION` inside the
 batch file before releasing a new build.
