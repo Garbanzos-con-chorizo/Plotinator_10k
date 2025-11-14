@@ -7,28 +7,30 @@ import re
 import pytest
 
 
-@pytest.mark.parametrize(
-    "path",
-    [
-        Path("docs/INSTALLER.md"),
-        Path("packaging/windows/README.md"),
-    ],
-)
-def test_wix_cli_instructions_are_v6(path: Path) -> None:
-    """Ensure the documentation references the WiX v6 CLI rather than legacy tools."""
+DOC_PATHS = [
+    Path("docs/INSTALLER.md"),
+    Path("packaging/windows/README.md"),
+]
+
+
+@pytest.mark.parametrize("path", DOC_PATHS)
+def test_wix_version_and_commands(path: Path) -> None:
+    """Ensure the docs reference the supported WiX 3.14 toolchain."""
 
     text = path.read_text(encoding="utf-8")
 
-    required = ("wix harvest", "wix build")
-    for command in required:
-        assert command in text, f"{path} should reference `{command}`"
+    assert "WiX Toolset 3.14" in text or "WiX Toolset v3.14" in text
+    assert "build-installer.bat" in text
+
+    required_commands = ("candle.exe", "light.exe")
+    for command in required_commands:
+        assert command in text, f"{path} should mention `{command}`"
 
     deprecated_patterns = [
-        r"\bheat(?:\.exe)?\b",
-        r"\bcandle(?:\.exe)?\b",
-        r"\blight(?:\.exe)?\b",
+        r"\bwix\s+harvest\b",
+        r"\bwix\s+build\b",
     ]
     for pattern in deprecated_patterns:
         assert not re.search(pattern, text), (
-            f"{path} still references legacy WiX command `{pattern}`"
+            f"{path} should not reference deprecated WiX command `{pattern}`"
         )

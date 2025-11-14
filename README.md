@@ -119,9 +119,9 @@ Each layer communicates through clear interfaces:
    - Run `pyinstaller packaging/plotinator.spec --clean --noconfirm` to produce the CLI, GUI, and report executables under
      `dist/plotinator-bundle`. Smoke-test `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` in place to
      ensure they launch and detect the bundled `external/` dependencies.
-   - Harvest the bundle with the WiX Toolset 6 using the assets under `packaging/windows/` and create the MSI as documented in the
-     [Installer Guide](docs/INSTALLER.md). Install the MSI on a clean VM to verify the GUI can run a sample batch and export a PDF
-     report.
+   - Regenerate `packaging/windows/plotinator-files.wxs` with WiX 3.14 `heat.exe`, then run `packaging/windows/build-installer.bat`
+     to produce `dist/Plotinator_10k.msi`. The [Installer Guide](docs/INSTALLER.md) mirrors the exact commands. Install the MSI on
+     a clean VM to verify the GUI can run a sample batch and export a PDF report.
 4. Publish to your artefact repository of choice (PyPI, internal index, etc.).
 
 ### Open beta build retrieval & validation
@@ -130,13 +130,13 @@ Tagged builds trigger the **Windows release packaging** workflow, which publishe
 under the run's *Artifacts* panel:
 
 - `plotinator-bundle-<tag>` – zipped PyInstaller output from `dist/plotinator-bundle/`.
-- `plotinator-open-beta-<tag>` – the WiX-generated installer from `dist/`.
+- `plotinator-msi-<tag>` – the WiX-generated installer (`dist/Plotinator_10k.msi`).
 
 To download them, either use the GitHub web UI or fetch via the CLI:
 
 ```bash
 gh run download --repo <org>/Plotinator_10k --name plotinator-bundle-<tag>
-gh run download --repo <org>/Plotinator_10k --name plotinator-open-beta-<tag>
+gh run download --repo <org>/Plotinator_10k --name plotinator-msi-<tag>
 ```
 
 Validate the artefacts before handing them to external testers:
@@ -144,7 +144,7 @@ Validate the artefacts before handing them to external testers:
 1. Verify file integrity on Windows by computing hashes and comparing against the workflow summary.
    ```powershell
     Get-FileHash .\plotinator-bundle-<tag>.zip -Algorithm SHA256
-    Get-FileHash .\Plotinator_OpenBeta-<tag>.msi -Algorithm SHA256
+    Get-FileHash .\Plotinator_10k.msi -Algorithm SHA256
    ```
 2. Provision a clean Windows VM (no cached dependencies) and extract the bundle.
    - Launch `plotinator-cli.exe`, `plotinator-gui.exe`, and `plotinator-report.exe` to ensure the

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Fragment>
+    <!--
+      This file must contain the component declarations for every executable, DLL,
+      and resource emitted by PyInstaller in dist/plotinator-bundle.
+
+      Generate the content on a Windows machine after freezing Plotinator 10k.
+      `heat.exe` from WiX 3.14 can produce the required markup:
+
+          "C:\\Program Files (x86)\\WiX Toolset v3.14\\bin\\heat.exe" dir dist\plotinator-bundle ^
+            -nologo ^
+            -cg PlotinatorFiles ^
+            -dr INSTALLFOLDER ^
+            -sreg ^
+            -sfrag ^
+            -scom ^
+            -srd ^
+            -out packaging\windows\plotinator-files.wxs
+
+      Replace the placeholder component group below with the generated output and
+      commit the final file so it can be copied verbatim to other build machines.
+      Ensure each Component/@Guid remains stable between releases.
+    -->
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <!-- Component declarations go here. -->
+    </DirectoryRef>
+
+    <ComponentGroup Id="PlotinatorFiles">
+      <!-- ComponentRef entries go here. -->
+    </ComponentGroup>
+  </Fragment>
+</Wix>

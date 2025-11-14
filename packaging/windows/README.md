@@ -1,39 +1,69 @@
-# Windows Packaging Assets
+# Windows MSI Packaging Checklist
 
-This folder contains helper assets for turning the PyInstaller output into a Windows MSI installer.
+This folder contains the WiX sources and helper script required to turn the
+PyInstaller output into a repeatable MSI installer on **any** Windows machine.
+Follow the steps below without deviation to avoid schema or toolchain issues.
 
-## Files
+## 1. Install WiX 3.14
 
-- `plotinator.wxs` – WiX authoring template that wraps the PyInstaller bundle. Replace the `UpgradeCode`
-  value with a stable GUID the first time you ship an MSI.
+Only WiX Toolset **v3.14.0.6526** works with the current authoring. Later
+versions (v4/v6) use incompatible schemas and will not build this project.
+Download and install:
 
-## Usage Overview
+<https://wixtoolset.org/releases/v3.14.0.6526/wix314.exe>
 
-1. **Freeze the application** using the shared PyInstaller spec:
-   ```powershell
-   pyinstaller packaging/plotinator.spec --clean --noconfirm
-   ```
-   The output folder `dist\plotinator-bundle` should contain the three executables and resource data.
-2. **Harvest the bundle** into WiX component markup:
-   ```powershell
-   $bundle = Resolve-Path dist/plotinator-bundle
-   New-Item -ItemType Directory -Force -Path packaging/windows/build | Out-Null
-   wix harvest dir $bundle `
-     -id PlotinatorBundleComponents `
-     -ext WixToolset.Heat.wixext `
-     -out packaging/windows/build/plotinator-files.wxs
-   ```
-3. **Build** the MSI using the template:
-   ```powershell
-   $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
-   wix build `
-     packaging/windows/plotinator.wxs `
-     packaging/windows/build/plotinator-files.wxs `
-     -ext WixToolset.UI.wixext `
-     -out dist/Plotinator_OpenBeta-$version.msi `
-     -dPLOTINATOR_VERSION=$version
-   ```
-4. **Verify the installer** by running it on a clean Windows VM and checking that the CLI, GUI, and
-   report helpers launch from `Program Files\Plotinator Open Beta` without missing dependency errors.
+The installer places the binaries under
+`C:\Program Files (x86)\WiX Toolset v3.14\bin`. The batch script assumes this
+exact path.
 
-For a fuller walkthrough that includes environment setup and validation steps, see `docs/INSTALLER.md`.
+## 2. Prepare the repository layout
+
+Ensure the repository matches the following structure on disk (PyInstaller
+outputs live in `dist/plotinator-bundle`):
+
+```
+Plotinator_10k/
+ ├─ dist/
+ │   └─ plotinator-bundle/
+ │        ├─ plotinator-cli.exe
+ │        ├─ plotinator-gui.exe
+ │        ├─ plotinator-report.exe
+ │        └─ _internal/ (all DLLs)
+ └─ packaging/
+      └─ windows/
+            plotinator.wxs
+            plotinator-files.wxs
+            build-installer.bat
+            plotinator.ico (optional)
+```
+
+Generate `plotinator-files.wxs` using WiX `heat.exe` after building the
+PyInstaller bundle. The template in this repository documents the expected
+command line—replace the placeholder markup with the harvested components and
+commit the result so it can be reused on every build workstation.
+
+## 3. Build the MSI
+
+From `packaging/windows/`, run the provided batch script:
+
+```
+build-installer.bat
+```
+
+The script compiles `plotinator.wxs` and `plotinator-files.wxs` with WiX 3.14
+(`candle.exe` + `light.exe`) and writes `dist/Plotinator_10k.msi`. The default
+version embedded in the MSI is `1.0.0`; adjust `PRODUCT_VERSION` inside the
+batch file before releasing a new build.
+
+## 4. Release checklist
+
+- [ ] `plotinator.wxs` retains the UpgradeCode
+  `A1C3D9E4-5B27-41F8-9C71-2F91BBAC7E54` (no braces).
+- [ ] Every component in `plotinator-files.wxs` targets `INSTALLFOLDER` (the
+      64-bit `ProgramFiles64Folder`).
+- [ ] Each `<Component>` in `plotinator-files.wxs` uses a unique, stable `Guid`.
+- [ ] The PyInstaller bundle includes all executables and dependency DLLs.
+- [ ] `build-installer.bat` completes successfully and prints the MSI path.
+
+When all boxes are checked, the resulting MSI installs Plotinator 10k into
+`Program Files\Plotinator 10k` with the expected shortcuts and binaries.
