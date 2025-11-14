@@ -1,62 +1,42 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
-
 name: Python application
 
 on:
   push:
     branches: [ "main" ]
-    tags:
-      - "v*"
   pull_request:
     branches: [ "main" ]
 
-permissions:
-  contents: read
-
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v3
     - name: Set up Python 3.10
-      uses: actions/setup-python@v3
+      uses: actions/setup-python@v4
       with:
         python-version: "3.10"
-    - name: Cache pip
-      uses: actions/cache@v3
-      with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install .[dev]
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        pip install .
     - name: Lint with ruff
       run: |
-        pip install -U ruff
+        pip install ruff
         ruff check .
     - name: Test with pytest
       run: |
+        pip install pytest
         pytest
-    - name: Build package
-      run: |
-        python -m build
 
   windows-package:
-    name: Windows release packaging
     runs-on: windows-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v3
     - name: Set up Python 3.10
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v4
       with:
         python-version: "3.10"
     - name: Cache pip downloads for Windows builds
@@ -72,47 +52,47 @@ jobs:
         python -m pip install --upgrade pip
         pip install .
         pip install pyinstaller
-    - name: Install WiX Toolset via Chocolatey
+    - name: Install WiX Toolset 3.14
       shell: pwsh
       run: |
-        choco install wixtoolset --no-progress -y
-        $wixPath = "C:\\Program Files (x86)\\WiX Toolset v3.11\\bin"
-        if (Test-Path $wixPath) {
-          $wixPath | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+        $wixInstaller = "$env:TEMP\\wix314.exe"
+        Invoke-WebRequest -Uri "https://wixtoolset.org/releases/v3.14.0.6526/wix314.exe" -OutFile $wixInstaller
+        Start-Process -FilePath $wixInstaller -ArgumentList "/quiet" -NoNewWindow -Wait
+        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.14\\bin"
+        if (!(Test-Path $wixBin)) {
+          throw "WiX Toolset v3.14 not installed at $wixBin"
         }
+        $wixBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
     - name: Build PyInstaller bundle
       shell: pwsh
       run: |
         pyinstaller packaging/plotinator.spec --clean --noconfirm
-    - name: Create MSI with WiX
+    - name: Harvest bundle into WiX components
       shell: pwsh
       run: |
         $bundle = Resolve-Path dist/plotinator-bundle
-        New-Item -ItemType Directory -Force -Path packaging/windows/build | Out-Null
-        heat dir $bundle `
-          -dr APPLICATIONFOLDER `
-          -cg PlotinatorBundleComponents `
-          -gg `
-          -sfrag `
-          -srd `
-          -out packaging/windows/build/plotinator-files.wxs
+        $wixBin = "C:\\Program Files (x86)\\WiX Toolset v3.14\\bin"
+        & "$wixBin\\heat.exe" dir $bundle `
+          -nologo `
+          -cg PlotinatorFiles `
+          -dr INSTALLFOLDER `
+          -sreg -sfrag -scom -srd `
+          -out packaging/windows/plotinator-files.wxs
+    - name: Build MSI with WiX 3.14 script
+      shell: pwsh
+      run: |
         $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
-        candle packaging/windows/plotinator.wxs packaging/windows/build/plotinator-files.wxs `
-          -dPLOTINATOR_VERSION=$version `
-          -out packaging/windows/build/
-        light packaging/windows/build/plotinator.wixobj packaging/windows/build/plotinator-files.wixobj `
-          -ext WixUIExtension `
-          -cultures:en-us `
-          -o dist/plotinator-$version.msi
+        (Get-Content packaging/windows/build-installer.bat -Raw) -replace 'set "PRODUCT_VERSION=1.0.0"', "set \"PRODUCT_VERSION=$version\"" | Set-Content packaging/windows/build-installer.bat
+        Push-Location packaging/windows
+        cmd /c build-installer.bat
+        Pop-Location
     - name: Upload PyInstaller bundle artifact
       uses: actions/upload-artifact@v4
       with:
         name: plotinator-bundle-${{ github.ref_name }}
-        path: dist/plotinator-bundle/
-        if-no-files-found: error
+        path: dist/plotinator-bundle/**
     - name: Upload MSI artifact
       uses: actions/upload-artifact@v4
       with:
         name: plotinator-msi-${{ github.ref_name }}
-        path: dist/*.msi
-        if-no-files-found: error
+        path: dist/Plotinator_10k.msi
