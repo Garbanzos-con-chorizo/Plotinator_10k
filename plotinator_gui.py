@@ -86,7 +86,8 @@ class PlotinatorApp(ttkb.Window):
         self.geometry("1200x800")
         self.resizable(True, True)
 
-        self.style = ttkb.Style()
+        self.ttkstyle = ttkb.Style()
+
         self.folder: Path | None = None
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
@@ -119,13 +120,13 @@ class PlotinatorApp(ttkb.Window):
         toolbar.pack(fill="x")
         toolbar_logo = self._images.get("toolbar_button")
         button_plan = [
-            ("Data Folder", self.select_folder, "info-outline", True),
-            ("Add Fit", self.add_fit, "success-outline", False),
-            ("Delete Fit", self.delete_fit, "danger-outline", True),
-            ("Save Config", self.save_config, "secondary-outline", False),
-            ("Run Batch", self.run_batch, "success", True),
-            ("Stop Batch", self.stop_batch, "danger", True),
-            ("Open Report", self.open_latest_report, "primary-outline", False),
+            ("Data Folder", lambda: self.select_folder(), "info-outline", True),
+            ("Add Fit", lambda: self.add_fit(), "success-outline", False),
+            ("Delete Fit", lambda: self.delete_fit(), "danger-outline", True),
+            ("Save Config", lambda: self.save_config(), "secondary-outline", False),
+            ("Run Batch", lambda: self.run_batch(), "success", True),
+            ("Stop Batch", lambda: self.stop_batch(), "danger", True),
+            ("Open Report", lambda: self.open_latest_report(), "primary-outline", False),
         ]
         for text, cmd, style, use_logo in button_plan:
             kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
