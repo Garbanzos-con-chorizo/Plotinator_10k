@@ -9,7 +9,7 @@ set "WXS_FILES=plotinator-files.wxs"
 set "MSI_OUT=Plotinator_10k.msi"
 set "PRODUCT_VERSION=1.0.0"
 
-set "WIX_BIN=C:\Program Files (x86)\WiX Toolset v3.14\bin"
+set "WIX_BIN=C:\Program Files (x86)\WiX Toolset v3.11\bin"
 
 cd /d "%PROJECT_DIR%"
 

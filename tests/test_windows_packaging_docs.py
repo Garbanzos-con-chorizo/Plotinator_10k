@@ -1,11 +1,33 @@
 """Guardrails for the Windows packaging documentation."""
+
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 import pytest
 
+PACKAGING_SCRIPT = Path("packaging/windows/build-installer.bat")
+
+
+def _determine_supported_wix_version() -> str:
+    """Return the WiX major.minor version encoded in the batch script."""
+
+    if not PACKAGING_SCRIPT.exists():  # pragma: no cover - repository invariant
+        raise AssertionError(
+            "packaging/windows/build-installer.bat is required for MSI builds"
+        )
+
+    script_text = PACKAGING_SCRIPT.read_text(encoding="utf-8")
+    match = re.search(r"WiX Toolset v(?P<version>\d+\.\d+)", script_text)
+    if not match:  # pragma: no cover - defensive guard for future edits
+        raise AssertionError(
+            "packaging/windows/build-installer.bat must pin a WiX Toolset version"
+        )
+    return match.group("version")
+
+
+SUPPORTED_WIX_VERSION = _determine_supported_wix_version()
 
 DOC_PATHS = [
     Path("docs/INSTALLER.md"),
@@ -15,11 +37,18 @@ DOC_PATHS = [
 
 @pytest.mark.parametrize("path", DOC_PATHS)
 def test_wix_version_and_commands(path: Path) -> None:
-    """Ensure the docs reference the supported WiX 3.14 toolchain."""
+    """Ensure the docs reference the WiX toolchain pinned in the batch script."""
 
     text = path.read_text(encoding="utf-8")
 
-    assert "WiX Toolset 3.14" in text or "WiX Toolset v3.14" in text
+    version_tokens = (
+        f"WiX Toolset {SUPPORTED_WIX_VERSION}",
+        f"WiX Toolset v{SUPPORTED_WIX_VERSION}",
+    )
+    assert any(token in text for token in version_tokens), (
+        "Update the Windows packaging docs to mention the WiX Toolset version "
+        f"pinned in {PACKAGING_SCRIPT} ({SUPPORTED_WIX_VERSION})."
+    )
     assert "build-installer.bat" in text
 
     required_commands = ("candle.exe", "light.exe")
