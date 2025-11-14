@@ -19,14 +19,13 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install .
+        pip install '.[dev]'
     - name: Lint with ruff
       run: |
         pip install ruff
         ruff check .
     - name: Test with pytest
       run: |
-        pip install pytest
         pytest
 
   windows-package:
@@ -50,7 +49,7 @@ jobs:
       shell: pwsh
       run: |
         python -m pip install --upgrade pip
-        pip install .
+        pip install '.[dev]'
         pip install pyinstaller
     - name: Install WiX Toolset 3.14
       shell: pwsh
@@ -82,7 +81,7 @@ jobs:
       shell: pwsh
       run: |
         $version = (python -c "import plotinator; print(plotinator.__version__)").Trim()
-        (Get-Content packaging/windows/build-installer.bat -Raw) -replace 'set "PRODUCT_VERSION=1.0.0"', "set \"PRODUCT_VERSION=$version\"" | Set-Content packaging/windows/build-installer.bat
+        (Get-Content packaging/windows/build-installer.bat -Raw) -replace 'set "PRODUCT_VERSION=1.0.0"', "set ""PRODUCT_VERSION=$version""" | Set-Content packaging/windows/build-installer.bat
         Push-Location packaging/windows
         cmd /c build-installer.bat
         Pop-Location
