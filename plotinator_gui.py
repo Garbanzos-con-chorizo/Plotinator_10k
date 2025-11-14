@@ -17,6 +17,41 @@ from engine import run_batch as engine_run_batch
 
 CONFIG_PATH = "config.json"
 
+_TOAST_COLORS: dict[str, str] = {
+    "info": "#2E86C1",
+    "success": "#27AE60",
+    "warning": "#F39C12",
+    "error": "#C0392B",
+}
+
+
+def _show_toast(widget: tk.Misc, message: str, level: str = "info") -> None:
+    """Display a temporary notification near the widget's toplevel window."""
+
+    try:
+        anchor: tk.Misc = widget if isinstance(widget, tk.Tk) else widget.winfo_toplevel()
+    except tk.TclError:
+        return
+
+    def _create_toast() -> None:
+        toast = tk.Toplevel(anchor)
+        toast.overrideredirect(True)
+        toast.configure(bg=_TOAST_COLORS.get(level, _TOAST_COLORS["info"]))
+        ttkb.Label(toast, text=message, bootstyle="inverse", padding=10).pack()
+        anchor.update_idletasks()
+        x = anchor.winfo_rootx() + anchor.winfo_width() - 260
+        y = anchor.winfo_rooty() + anchor.winfo_height() - 100
+        toast.geometry(f"240x60+{x}+{y}")
+        toast.after(2500, toast.destroy)
+
+    try:
+        anchor.after(0, _create_toast)
+    except tk.TclError:
+        _create_toast()
+
+
+setattr(tk.Misc, "show_toast", _show_toast)
+
 
 class BatchWorker:
     """Background helper to execute engine runs and forward structured events."""
@@ -1144,21 +1179,7 @@ class DatasetDialog(ttkb.Toplevel):
 
     # ------------------------------------------------------------------
     def show_toast(self, message: str, level: str = "info") -> None:
-        colors = {
-            "info": "#2E86C1",
-            "success": "#27AE60",
-            "warning": "#F39C12",
-            "error": "#C0392B",
-        }
-        toast = tk.Toplevel(self)
-        toast.overrideredirect(True)
-        toast.configure(bg=colors.get(level, "#2E86C1"))
-        ttkb.Label(toast, text=message, bootstyle="inverse", padding=10).pack()
-        self.update_idletasks()
-        x = self.winfo_rootx() + self.winfo_width() - 260
-        y = self.winfo_rooty() + self.winfo_height() - 100
-        toast.geometry(f"240x60+{x}+{y}")
-        toast.after(2500, toast.destroy)
+        _show_toast(self, message, level)
 
     # ------------------------------------------------------------------
     def destroy(self) -> None:  # type: ignore[override]
