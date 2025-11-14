@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Any
+from typing import Any, Sequence
 
 import ttkbootstrap as ttkb
 
@@ -86,8 +86,8 @@ class PlotinatorApp(ttkb.Window):
         self.geometry("1200x800")
         self.resizable(True, True)
 
-        self.ttkstyle = ttkb.Style()
-
+        base_style = getattr(self, "style", None)
+        self._style = base_style if isinstance(base_style, ttkb.Style) else ttkb.Style()
         self.folder: Path | None = None
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
@@ -97,6 +97,7 @@ class PlotinatorApp(ttkb.Window):
         self._progress_completed = 0
         self.status_var = tk.StringVar(self, value="Idle")
         self._images: dict[str, tk.PhotoImage] = {}
+        self._available_data_files: list[Path] = []
         self._load_images()
 
         self._create_widgets()
@@ -217,18 +218,46 @@ class PlotinatorApp(ttkb.Window):
             self._images["toolbar_log"] = self._scale_image(toolbar_icon, 48)
 
     # ------------------------------------------------------------------
+    def _default_data_dir(self) -> Path | None:
+        base = self.folder or self.job.base_path
+        try:
+            resolved = base.resolve()
+        except FileNotFoundError:
+            return None
+        if resolved.exists():
+            return resolved
+        return None
+
+    # ------------------------------------------------------------------
+    def _refresh_available_data_files(self) -> None:
+        data_dir = self._default_data_dir()
+        if data_dir is None:
+            self._available_data_files = []
+            return
+        try:
+            files = sorted(p for p in data_dir.rglob("*.dat") if p.is_file())
+        except OSError as exc:
+            self._available_data_files = []
+            self._append_log(f"[DATA] Unable to scan data files: {exc}\n")
+            return
+        self._available_data_files = files
+
+    # ------------------------------------------------------------------
     def toggle_theme(self) -> None:
-        current = self.style.theme.name
+        current = self._style.theme.name
         new_theme = "flatly" if current == "superhero" else "superhero"
-        self.style.theme_use(new_theme)
+        self._style.theme_use(new_theme)
         self.show_toast(f"Theme switched to {new_theme.title()}")
 
     # ------------------------------------------------------------------
     def load_config(self) -> None:
         if not self.config_path.exists():
-            self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
+            base_dir = self.config_path.parent.resolve()
+            self.job = PlotinatorConfig(base_path=base_dir, fits=[])
+            self.folder = base_dir
             self.save_config()
             self.refresh_table()
+            self._refresh_available_data_files()
             return
 
         try:
@@ -237,12 +266,20 @@ class PlotinatorApp(ttkb.Window):
             error_message = f"Failed to load config: {exc}"
             self._append_log(f"[CONFIG] {error_message}\n")
             self.show_toast(error_message, level="error")
-            self.job = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
+            base_dir = self.config_path.parent.resolve()
+            self.job = PlotinatorConfig(base_path=base_dir, fits=[])
+            self.folder = base_dir
+            self.refresh_table()
+            self._refresh_available_data_files()
             return
+        self.folder = self.job.base_path
         self.refresh_table()
+        self._refresh_available_data_files()
 
     # ------------------------------------------------------------------
     def save_config(self) -> None:
+        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        self.job.base_path = self.config_path.parent.resolve()
         payload = self.job.to_dict()
         with open(self.config_path, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2)
@@ -284,9 +321,22 @@ class PlotinatorApp(ttkb.Window):
     # ------------------------------------------------------------------
     def select_folder(self) -> None:
         folder = filedialog.askdirectory(title="Select data folder")
-        if folder:
-            self.folder = Path(folder)
-            self.show_toast(f"Folder set to {self.folder}")
+        if not folder:
+            return
+
+        if self._worker and self._worker.is_running():
+            warning_message = "Stop the running batch before changing folders."
+            self.show_toast(warning_message, level="warning")
+            messagebox.showwarning("Plotinator", warning_message)
+            return
+
+        self._stop_runner_thread()
+        selected = Path(folder).resolve()
+        self.folder = selected
+        self.config_path = (selected / CONFIG_PATH).resolve()
+        self.job.base_path = selected
+        self.show_toast(f"Folder set to {self.folder}")
+        self.load_config()
 
     # ------------------------------------------------------------------
     def add_fit(self) -> None:
@@ -452,7 +502,11 @@ class PlotinatorApp(ttkb.Window):
         refresh_dataset_tree()
 
         def add_dataset() -> None:
-            dialog = DatasetDialog(editor)
+            dialog = DatasetDialog(
+                editor,
+                data_dir=self._default_data_dir(),
+                data_files=self._available_data_files,
+            )
             editor.wait_window(dialog)
             if dialog.result:
                 dataset_list.append(dialog.result)
@@ -467,7 +521,12 @@ class PlotinatorApp(ttkb.Window):
                 current = dataset_list[idx]
             except IndexError:
                 return
-            dialog = DatasetDialog(editor, current)
+            dialog = DatasetDialog(
+                editor,
+                current,
+                data_dir=self._default_data_dir(),
+                data_files=self._available_data_files,
+            )
             editor.wait_window(dialog)
             if dialog.result:
                 dataset_list[idx] = dialog.result
@@ -539,6 +598,7 @@ class PlotinatorApp(ttkb.Window):
                 except IndexError:
                     fits.append(payload)
             if self._reload_from_mapping(mapping):
+                self._refresh_available_data_files()
                 editor.destroy()
 
         buttons = ttkb.Frame(editor)
@@ -552,13 +612,36 @@ class PlotinatorApp(ttkb.Window):
         ).pack(side="right", padx=5)
 
 class DatasetDialog(ttkb.Toplevel):
-    def __init__(self, master: tk.Misc, dataset: dict | None = None) -> None:
+    def __init__(
+        self,
+        master: tk.Misc,
+        dataset: dict | None = None,
+        *,
+        data_dir: Path | None = None,
+        data_files: Sequence[Path] | None = None,
+    ) -> None:
         super().__init__(master)
         self.title("Dataset settings")
         self.result: dict | None = None
         self.resizable(False, False)
         self.transient(master)
         self.grab_set()
+
+        if data_dir is not None:
+            try:
+                self._data_dir = data_dir.resolve()
+            except FileNotFoundError:
+                self._data_dir = data_dir
+        else:
+            self._data_dir = None
+        resolved_files: list[Path] = []
+        for path in data_files or []:
+            try:
+                resolved_files.append(path.resolve())
+            except FileNotFoundError:
+                resolved_files.append(path)
+        self._available_files: tuple[Path, ...] = tuple(resolved_files)
+        self._file_selector: ttkb.Combobox | None = None
 
         data = copy.deepcopy(dataset) if dataset else {}
         columns = (data.get("data_source", {}) or {}).get("columns", {})
@@ -585,7 +668,13 @@ class DatasetDialog(ttkb.Toplevel):
         self.path_entry.insert(0, (data.get("data_source") or {}).get("path", ""))
 
         def browse() -> None:
-            chosen = filedialog.askopenfilename(title="Select data file")
+            dialog_options: dict[str, object] = {
+                "title": "Select data file",
+                "filetypes": (("Data files", "*.dat"), ("All files", "*.*")),
+            }
+            if self._data_dir is not None and self._data_dir.exists():
+                dialog_options["initialdir"] = str(self._data_dir)
+            chosen = filedialog.askopenfilename(**dialog_options)
             if chosen:
                 self.path_entry.delete(0, tk.END)
                 self.path_entry.insert(0, chosen)
@@ -594,35 +683,53 @@ class DatasetDialog(ttkb.Toplevel):
             row=2, column=2, padx=10, pady=6
         )
 
-        ttkb.Label(self, text="X column").grid(row=3, column=0, sticky="w", padx=10, pady=6)
+        if self._available_files:
+            ttkb.Label(self, text="Available data files").grid(
+                row=3, column=0, sticky="w", padx=10, pady=6
+            )
+            display_values = [self._format_display_path(path) for path in self._available_files]
+            self._file_selector = ttkb.Combobox(self, values=display_values, state="readonly")
+            self._file_selector.grid(row=3, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
+            self._file_selector.bind("<<ComboboxSelected>>", self._on_data_file_selected)
+            current_path_text = self.path_entry.get().strip()
+            if current_path_text:
+                resolved_current = self._resolve_candidate(current_path_text)
+                for idx, file_path in enumerate(self._available_files):
+                    if resolved_current == file_path:
+                        self._file_selector.current(idx)
+                        break
+        else:
+            display_values = []
+
+        ttkb.Label(self, text="X column").grid(row=4, column=0, sticky="w", padx=10, pady=6)
         self.x_spin = ttkb.Spinbox(self, from_=1, to=128, width=6)
-        self.x_spin.grid(row=3, column=1, sticky="w", padx=10, pady=6)
+        self.x_spin.grid(row=4, column=1, sticky="w", padx=10, pady=6)
         self.x_spin.set(str(columns.get("x", 1)))
 
-        ttkb.Label(self, text="Y column").grid(row=4, column=0, sticky="w", padx=10, pady=6)
+        ttkb.Label(self, text="Y column").grid(row=5, column=0, sticky="w", padx=10, pady=6)
         self.y_spin = ttkb.Spinbox(self, from_=1, to=128, width=6)
-        self.y_spin.grid(row=4, column=1, sticky="w", padx=10, pady=6)
+        self.y_spin.grid(row=5, column=1, sticky="w", padx=10, pady=6)
         self.y_spin.set(str(columns.get("y", 2)))
 
-        ttkb.Label(self, text="Error column").grid(row=3, column=2, sticky="w", padx=10, pady=6)
+        ttkb.Label(self, text="Error column").grid(row=4, column=2, sticky="w", padx=10, pady=6)
         self.error_entry = ttkb.Entry(self, width=6)
         if columns.get("error") not in (None, ""):
             self.error_entry.insert(0, str(columns.get("error")))
-        self.error_entry.grid(row=3, column=3, sticky="w", padx=10, pady=6)
+        self.error_entry.grid(row=4, column=3, sticky="w", padx=10, pady=6)
 
-        ttkb.Label(self, text="Weight column").grid(row=4, column=2, sticky="w", padx=10, pady=6)
+        ttkb.Label(self, text="Weight column").grid(row=5, column=2, sticky="w", padx=10, pady=6)
         self.weight_entry = ttkb.Entry(self, width=6)
         if columns.get("weight") not in (None, ""):
             self.weight_entry.insert(0, str(columns.get("weight")))
-        self.weight_entry.grid(row=4, column=3, sticky="w", padx=10, pady=6)
+        self.weight_entry.grid(row=5, column=3, sticky="w", padx=10, pady=6)
 
-        ttkb.Label(self, text="Line color").grid(row=5, column=0, sticky="w", padx=10, pady=6)
+        ttkb.Label(self, text="Line color").grid(row=6, column=0, sticky="w", padx=10, pady=6)
         self.color_entry = ttkb.Entry(self)
-        self.color_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
+        self.color_entry.grid(row=6, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         self.color_entry.insert(0, style.get("line_color", ""))
 
         ttkb.Label(self, text="Preprocessing (JSON list)").grid(
-            row=6,
+            row=7,
             column=0,
             sticky="nw",
             padx=10,
@@ -635,14 +742,14 @@ class DatasetDialog(ttkb.Toplevel):
         except TypeError:
             text_value = "[]"
         self.preprocess_text.insert("1.0", text_value)
-        self.preprocess_text.grid(row=6, column=1, columnspan=3, sticky="nsew", padx=10, pady=6)
+        self.preprocess_text.grid(row=7, column=1, columnspan=3, sticky="nsew", padx=10, pady=6)
 
         self.columnconfigure(1, weight=1)
         self.columnconfigure(2, weight=0)
-        self.rowconfigure(6, weight=1)
+        self.rowconfigure(7, weight=1)
 
         button_frame = ttkb.Frame(self)
-        button_frame.grid(row=7, column=0, columnspan=4, sticky="e", padx=10, pady=10)
+        button_frame.grid(row=8, column=0, columnspan=4, sticky="e", padx=10, pady=10)
         ttkb.Button(button_frame, text="Cancel", command=self.destroy).pack(side="right", padx=5)
         ttkb.Button(
             button_frame,
@@ -652,6 +759,37 @@ class DatasetDialog(ttkb.Toplevel):
         ).pack(side="right", padx=5)
 
         self.protocol("WM_DELETE_WINDOW", self.destroy)
+
+    def _format_display_path(self, path: Path) -> str:
+        try:
+            if self._data_dir is not None:
+                return path.relative_to(self._data_dir).as_posix()
+        except ValueError:
+            pass
+        return path.as_posix()
+
+    def _resolve_candidate(self, raw_path: str | Path) -> Path:
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            if self._data_dir is not None:
+                candidate = self._data_dir / candidate
+            else:
+                candidate = Path.cwd() / candidate
+        try:
+            return candidate.resolve()
+        except FileNotFoundError:
+            return candidate
+
+    def _on_data_file_selected(self, _event: tk.Event | None = None) -> None:
+        if not self._file_selector:
+            return
+        index = self._file_selector.current()
+        if index < 0 or index >= len(self._available_files):
+            return
+        selected_path = self._available_files[index]
+        display_value = self._format_display_path(selected_path)
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, display_value)
 
     def _on_save(self) -> None:
         def notify(
@@ -678,7 +816,36 @@ class DatasetDialog(ttkb.Toplevel):
         else:
             pane_payload["pane_index"] = 1
 
-        path = self.path_entry.get().strip()
+        path_raw = self.path_entry.get().strip()
+        if not path_raw:
+            notify("Select a data file before saving.", focus_widget=self.path_entry)
+            return
+
+        resolved_path = self._resolve_candidate(path_raw)
+        if not resolved_path.exists() and self._data_dir is not None:
+            target = Path(path_raw)
+            if target.name:
+                try:
+                    matches = list(self._data_dir.rglob(target.name))
+                except OSError:
+                    matches = []
+                if matches:
+                    resolved_path = matches[0]
+        if not resolved_path.exists():
+            notify(f"Data file not found: {path_raw}", focus_widget=self.path_entry)
+            return
+
+        if self._data_dir is not None:
+            try:
+                path_value = resolved_path.relative_to(self._data_dir).as_posix()
+            except ValueError:
+                path_value = resolved_path.as_posix()
+        else:
+            path_value = resolved_path.as_posix()
+
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, path_value)
+
         x_value_raw = (self.x_spin.get() or "").strip()
         y_value_raw = (self.y_spin.get() or "").strip()
         try:
@@ -722,7 +889,7 @@ class DatasetDialog(ttkb.Toplevel):
         else:
             preprocessing = []
 
-        data_source = {"path": path, "columns": columns, "preprocessing": preprocessing}
+        data_source = {"path": path_value, "columns": columns, "preprocessing": preprocessing}
 
         color_value = self.color_entry.get().strip()
         style: dict[str, str] = {}
