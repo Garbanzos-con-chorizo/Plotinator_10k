@@ -18,6 +18,65 @@ from engine import run_batch as engine_run_batch
 CONFIG_PATH = "config.json"
 
 
+class BatchWorker:
+    """Background helper to execute engine runs and forward structured events."""
+
+    def __init__(self, config_path: Path) -> None:
+        self.config_path = Path(config_path)
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._events: queue.Queue[dict[str, Any]] | None = None
+        self._job_error_emitted = False
+
+    def is_running(self) -> bool:
+        thread = self._thread
+        return thread is not None and thread.is_alive()
+
+    def start(self) -> queue.Queue[dict[str, Any]]:
+        if self.is_running():
+            raise RuntimeError("Batch already running")
+
+        self._events = queue.Queue()
+        self._stop_event.clear()
+        self._job_error_emitted = False
+
+        class _BatchCancelled(Exception):
+            """Internal sentinel used to abort the engine runner."""
+
+            pass
+
+        def _push_event(event: dict[str, Any]) -> None:
+            if self._stop_event.is_set():
+                raise _BatchCancelled
+            if event.get("type") == "job-error":
+                self._job_error_emitted = True
+            assert self._events is not None
+            self._events.put(event)
+
+        def _runner() -> None:
+            try:
+                engine_run_batch(str(self.config_path), on_event=_push_event)
+            except _BatchCancelled:
+                if self._events is not None:
+                    self._events.put({"type": "job-cancelled"})
+            except Exception as exc:  # noqa: BLE001 - surfaced through events
+                if not self._job_error_emitted and self._events is not None:
+                    self._events.put({"type": "job-exception", "error": str(exc)})
+            finally:
+                self._thread = None
+
+        self._thread = threading.Thread(target=_runner, daemon=True)
+        self._thread.start()
+        return self._events
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join()
+        self._thread = None
+        self._stop_event.clear()
+
 class PlotinatorApp(ttkb.Window):
     """Simple desktop helper for editing Plotinator config files."""
 
@@ -31,8 +90,7 @@ class PlotinatorApp(ttkb.Window):
         self.folder: Path | None = None
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
-        self.runner_thread: threading.Thread | None = None
-        self._stop_log = threading.Event()
+        self._worker: BatchWorker | None = None
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
         self._progress_completed = 0
@@ -66,6 +124,7 @@ class PlotinatorApp(ttkb.Window):
             ("Delete Fit", self.delete_fit, "danger-outline", True),
             ("Save Config", self.save_config, "secondary-outline", False),
             ("Run Batch", self.run_batch, "success", True),
+            ("Stop Batch", self.stop_batch, "danger", True),
             ("Open Report", self.open_latest_report, "primary-outline", False),
         ]
         for text, cmd, style, use_logo in button_plan:
@@ -679,7 +738,8 @@ class DatasetDialog(ttkb.Toplevel):
 
     # ------------------------------------------------------------------
     def run_batch(self) -> None:
-        if self.runner_thread and self.runner_thread.is_alive():
+        worker = self._worker
+        if worker and worker.is_running():
             info_message = "Batch already running."
             self._append_log(f"[WARN] {info_message}\n")
             self.show_toast(info_message, level="warning")
@@ -690,50 +750,14 @@ class DatasetDialog(ttkb.Toplevel):
         self.log_text.delete("1.0", tk.END)
         self._progress_total = 0
         self._progress_completed = 0
-        self._stop_log.clear()
-        self._event_queue = queue.Queue()
+        self._worker = BatchWorker(self.config_path)
+        self._event_queue = self._worker.start()
         self._set_status("Launching batch…")
-
-        event_state = {"job_error": False}
-
-        class _BatchCancelled(Exception):
-            """Internal sentinel exception to abort the engine runner."""
-
-            pass
-
-        def _push_event(event: dict[str, Any]) -> None:
-            if self._stop_log.is_set():
-                raise _BatchCancelled
-            if self._event_queue is not None:
-                if event.get("type") == "job-error":
-                    event_state["job_error"] = True
-                self._event_queue.put(event)
-
-        def _runner() -> None:
-            try:
-                engine_run_batch(str(self.config_path), on_event=_push_event)
-            except _BatchCancelled:
-                self._append_log("[CANCELLED] Batch cancelled by user.\n")
-                self._set_status("Batch cancelled")
-            except Exception as exc:  # noqa: BLE001 - surface via events only
-                error_message = str(exc)
-                if not event_state["job_error"]:
-                    event_state["job_error"] = True
-                    if self._event_queue is not None:
-                        self._event_queue.put({"type": "job-error", "error": error_message})
-                    else:
-                        self._append_log(f"[X] {error_message}\n")
-                        self._set_status("Batch failed")
-            finally:
-                self.runner_thread = None
-
-        self.runner_thread = threading.Thread(target=_runner, daemon=True)
-        self.runner_thread.start()
         self.after(100, self._poll_events)
 
     # ------------------------------------------------------------------
     def _poll_events(self) -> None:
-        if self._event_queue is None:
+        if self._event_queue is None or self._worker is None:
             return
 
         try:
@@ -750,8 +774,8 @@ class DatasetDialog(ttkb.Toplevel):
             self.after(0, self._poll_events)
             return
 
-        runner = self.runner_thread
-        if (runner is None or not runner.is_alive()) and self._event_queue.empty():
+        if (not self._worker.is_running()) and self._event_queue.empty():
+            self._worker = None
             self._event_queue = None
             return
 
@@ -761,11 +785,10 @@ class DatasetDialog(ttkb.Toplevel):
     def _stop_runner_thread(self) -> None:
         """Request cancellation of the in-process engine runner and drain events."""
 
-        self._stop_log.set()
-        thread = self.runner_thread
-        if thread and thread.is_alive() and thread is not threading.current_thread():
-            thread.join()
-        self.runner_thread = None
+        worker = self._worker
+        if worker is not None:
+            worker.stop()
+        self._worker = None
         queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
         self._event_queue = None
         if queued_events is not None:
@@ -775,12 +798,14 @@ class DatasetDialog(ttkb.Toplevel):
                     self._handle_engine_event(event)
             except queue.Empty:
                 pass
-        self._stop_log.clear()
 
     # ------------------------------------------------------------------
     def stop_batch(self) -> None:
         """Public helper for stop controls to shut down the batch thread."""
-
+        worker = self._worker
+        if worker is None or not worker.is_running():
+            self.show_toast("No batch is currently running", level="info")
+            return
         self._stop_runner_thread()
 
     # ------------------------------------------------------------------
@@ -866,6 +891,7 @@ class DatasetDialog(ttkb.Toplevel):
             self.show_toast("Batch complete", level="success")
             self._set_status("Batch complete")
             self._event_queue = None
+            self._worker = None
             return
 
         if etype == "job-error":
@@ -875,6 +901,7 @@ class DatasetDialog(ttkb.Toplevel):
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
             self._event_queue = None
+            self._worker = None
             return
 
         if etype == "job-exception":
@@ -884,6 +911,15 @@ class DatasetDialog(ttkb.Toplevel):
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
             self._event_queue = None
+            self._worker = None
+            return
+
+        if etype == "job-cancelled":
+            self._append_log("[CANCELLED] Batch cancelled by user.\n")
+            self.show_toast("Batch cancelled", level="warning")
+            self._set_status("Batch cancelled")
+            self._event_queue = None
+            self._worker = None
             return
 
     # ------------------------------------------------------------------
