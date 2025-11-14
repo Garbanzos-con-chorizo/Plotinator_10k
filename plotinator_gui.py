@@ -1162,7 +1162,9 @@ class DatasetDialog(ttkb.Toplevel):
 
     # ------------------------------------------------------------------
     def destroy(self) -> None:  # type: ignore[override]
-        self._stop_runner_thread()
+        stop_runner = getattr(self, "_stop_runner_thread", None)
+        if callable(stop_runner):
+            stop_runner()
         super().destroy()
 
 
