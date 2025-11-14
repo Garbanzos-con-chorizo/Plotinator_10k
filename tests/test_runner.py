@@ -80,11 +80,13 @@ def test_run_job_produces_artifacts(
     output_dir = Path(result["output_dir"])
     assert output_dir == sample_paths.output_dir
     assert (output_dir / "fit_results.json").exists()
+    assert result["errors"] == []
 
     with open(result["results_path"], "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     assert payload["results"]
     assert payload["results"][0]["parameters"] == {"a": 1.0, "b": 2.0}
+    assert payload["errors"] == []
 
     first_result = result["results"][0]
     assert Path(first_result["datafile"]) == (sample_paths.config_dir / "sample.dat")
@@ -125,8 +127,79 @@ def test_run_job_handles_pdf_export_error(
 
     assert result["pdf_path"] is None
     assert Path(result["markdown_path"]).exists()
+    assert result["errors"] == []
 
     pdf_errors = [event for event in events if event["type"] == "report-error"]
     assert pdf_errors and pdf_errors[0]["stage"] == "pdf"
     assert any(event["type"] == "job-complete" for event in events)
     assert any(event["type"] == "plot-complete" for event in events)
+
+
+def test_run_job_records_plot_failures(
+    minimal_config: dict,
+    sample_paths,
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plot failures should be captured in the persisted results and events."""
+
+    events: list[dict] = []
+    _install_pipeline_stubs(monkeypatch, sample_paths.output_dir)
+
+    good_plot = {
+        "title": "Successful Plot",
+        "formula": "m*x + c",
+        "data_source": {
+            "path": minimal_config["fits"][0]["data_source"]["path"],
+            "columns": {"x": 1, "y": 2},
+        },
+    }
+
+    bad_plot = {
+        "title": "Explosive Plot",
+        "formula": "m*x + c",
+        "data_source": {
+            "path": minimal_config["fits"][0]["data_source"]["path"],
+            "columns": {"x": 1, "y": 2},
+        },
+    }
+
+    config = {"fits": [good_plot, bad_plot]}
+
+    def fake_process_plot(plot_cfg: dict, _base_output: object, dispatcher=None, **__: object) -> dict:
+        if plot_cfg["title"] == "Explosive Plot":
+            raise RuntimeError("kaboom")
+        if dispatcher is not None:
+            dispatcher.emit("plot-start", title=plot_cfg.get("title"))
+            dispatcher.emit("plot-complete", title=plot_cfg.get("title"))
+        return {
+            "title": plot_cfg["title"],
+            "parameters": {},
+            "metrics": {},
+            "datafile": str(sample_paths.config_dir / "sample.dat"),
+        }
+
+    monkeypatch.setattr(runner, "process_plot", fake_process_plot)
+
+    result = runner.run_job(
+        config,
+        config_path=str(config_path),
+        settings=JobSettings(max_workers=1),
+        output_dir=sample_paths.output_dir,
+        on_event=events.append,
+    )
+
+    assert len(result["results"]) == 1
+    assert result["results"][0]["title"] == "Successful Plot"
+    assert len(result["errors"]) == 1
+    assert result["errors"][0]["title"] == "Explosive Plot"
+    assert "kaboom" in result["errors"][0]["error"]
+
+    with open(result["results_path"], "r", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    assert len(payload["results"]) == 1
+    assert len(payload["errors"]) == 1
+
+    event_types = [event["type"] for event in events]
+    assert "plot-error" in event_types
+    assert "plot-complete" in event_types
