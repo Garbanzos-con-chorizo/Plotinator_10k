@@ -50,7 +50,7 @@ def _show_toast(widget: tk.Misc, message: str, level: str = "info") -> None:
         _create_toast()
 
 
-setattr(tk.Misc, "show_toast", _show_toast)
+tk.Misc.show_toast = _show_toast
 
 
 class BatchWorker:
