@@ -214,12 +214,13 @@ class PlotinatorApp(ttkb.Window):
 
         queue_frame = ttkb.Frame(content_paned, padding=0)
         queue_frame.columnconfigure(0, weight=1)
-        queue_frame.rowconfigure(0, weight=3)
-        queue_frame.rowconfigure(1, weight=2)
+        queue_frame.rowconfigure(0, weight=1)
         content_paned.add(queue_frame, weight=3)
 
-        table_frame = ttkb.Frame(queue_frame, padding=10)
-        table_frame.grid(row=0, column=0, sticky="nsew")
+        queue_paned = ttkb.Panedwindow(queue_frame, orient="vertical")
+        queue_paned.grid(row=0, column=0, sticky="nsew")
+
+        table_frame = ttkb.Frame(queue_paned, padding=10)
         columns = ("Title", "Formula", "Datasets", "Residuals")
         self.tree = ttkb.Treeview(
             table_frame,
@@ -232,23 +233,82 @@ class PlotinatorApp(ttkb.Window):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
+        queue_paned.add(table_frame, weight=3)
 
-        log_frame = ttkb.Labelframe(queue_frame, padding=10)
+        log_frame = ttkb.Labelframe(queue_paned, padding=10)
         if (log_icon := self._images.get("toolbar_log")) is not None:
             log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
             log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
             log_frame.configure(labelwidget=log_label)
         else:
             log_frame.configure(text="Batch log")
-        log_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        queue_paned.add(log_frame, weight=2)
+
+        self._log_history: list[str] = []
+        self._log_filter_job: str | None = None
+        self._log_filter_var = tk.StringVar(self, value="")
+        self._log_matches_var = tk.StringVar(self, value="")
+
+        log_controls = ttkb.Frame(log_frame)
+        log_controls.pack(fill="x", pady=(0, 8))
+
+        clear_button = ttkb.Button(
+            log_controls,
+            text="Clear",
+            command=lambda: self._clear_logs(user_action=True),
+            bootstyle="secondary-outline",
+        )
+        clear_button.pack(side="right")
+
+        save_button = ttkb.Button(
+            log_controls,
+            text="Save…",
+            command=self._save_logs,
+            bootstyle="primary-outline",
+        )
+        save_button.pack(side="right", padx=(0, 6))
+
+        ttkb.Label(log_controls, textvariable=self._log_matches_var, anchor="w").pack(
+            side="left", padx=(0, 10)
+        )
+
+        ttkb.Label(log_controls, text="Filter:").pack(side="left")
+        self._log_filter_entry = ttkb.Entry(
+            log_controls,
+            textvariable=self._log_filter_var,
+            width=30,
+        )
+        self._log_filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        log_container = ttkb.Frame(log_frame)
+        log_container.pack(fill="both", expand=True)
+
+        y_scroll = ttkb.Scrollbar(log_container, orient="vertical")
+        y_scroll.pack(side="right", fill="y")
+        x_scroll = ttkb.Scrollbar(log_container, orient="horizontal")
+        x_scroll.pack(side="bottom", fill="x")
+
         self.log_text = tk.Text(
-            log_frame,
+            log_container,
             height=10,
+            wrap="none",
             bg="#101820",
             fg="#39FF14",
             insertbackground="#39FF14",
         )
-        self.log_text.pack(fill="both", expand=True)
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        y_scroll.configure(command=self.log_text.yview)
+        x_scroll.configure(command=self.log_text.xview)
+        self.log_text.tag_configure(
+            "filter_match", background="#F4D03F", foreground="#101820"
+        )
+
+        self._log_filter_var.trace_add("write", self._queue_log_filter_update)
+        self.log_text.bind("<Control-f>", self._focus_log_filter)
+
+        queue_paned.paneconfigure(table_frame, weight=3)
+        queue_paned.paneconfigure(log_frame, weight=2)
 
         self._preview_container = self._build_preview_container(content_paned)
 
@@ -1230,7 +1290,7 @@ class PlotinatorApp(ttkb.Window):
 
         self.save_config()
         self.progress.configure(value=0)
-        self.log_text.delete("1.0", tk.END)
+        self._clear_logs(user_action=False)
         self._reset_preview_state()
         self._progress_total = 0
         self._progress_completed = 0
@@ -1451,11 +1511,99 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
+        self._log_history.append(text)
+
         def _write() -> None:
             self.log_text.insert(tk.END, text)
             self.log_text.see(tk.END)
+            self._apply_log_filter()
 
         self.after(0, _write)
+
+    # ------------------------------------------------------------------
+    def _queue_log_filter_update(self, *_: object) -> None:
+        if self._log_filter_job is not None:
+            try:
+                self.after_cancel(self._log_filter_job)
+            except tk.TclError:
+                pass
+        self._log_filter_job = self.after(150, self._apply_log_filter)
+
+    # ------------------------------------------------------------------
+    def _apply_log_filter(self) -> None:
+        self._log_filter_job = None
+        pattern = self._log_filter_var.get().strip()
+        self.log_text.tag_remove("filter_match", "1.0", tk.END)
+
+        if not pattern:
+            self._log_matches_var.set("")
+            return
+
+        start = "1.0"
+        matches = 0
+        while True:
+            idx = self.log_text.search(pattern, start, stopindex=tk.END, nocase=True)
+            if not idx:
+                break
+            end_idx = f"{idx}+{len(pattern)}c"
+            self.log_text.tag_add("filter_match", idx, end_idx)
+            start = end_idx
+            matches += 1
+
+        if matches:
+            label = "match" if matches == 1 else "matches"
+            self._log_matches_var.set(f"{matches} {label}")
+        else:
+            self._log_matches_var.set("No matches")
+
+    # ------------------------------------------------------------------
+    def _focus_log_filter(self, event=None) -> str:
+        self._log_filter_entry.focus_set()
+        self._log_filter_entry.select_range(0, tk.END)
+        return "break"
+
+    # ------------------------------------------------------------------
+    def _clear_logs(self, *, user_action: bool) -> None:
+        if self._log_filter_job is not None:
+            try:
+                self.after_cancel(self._log_filter_job)
+            except tk.TclError:
+                pass
+            self._log_filter_job = None
+        self._log_history.clear()
+        self.log_text.delete("1.0", tk.END)
+        self._apply_log_filter()
+        if user_action:
+            self.show_toast("Log cleared", level="info")
+
+    # ------------------------------------------------------------------
+    def _save_logs(self) -> None:
+        if not self._log_history:
+            self.show_toast("No log entries to save yet", level="info")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save log",
+            defaultextension=".log",
+            filetypes=[
+                ("Log files", "*.log"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("".join(self._log_history))
+        except OSError as exc:
+            self.show_toast("Failed to save logs", level="error")
+            self._append_log(f"[X] Could not save logs: {exc}\n")
+            return
+
+        self.show_toast("Logs saved", level="success")
+        self._append_log(f"[INFO] Logs saved to: {file_path}\n")
 
     # ------------------------------------------------------------------
     def open_latest_report(self) -> None:
