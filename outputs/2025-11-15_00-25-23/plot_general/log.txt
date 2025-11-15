@@ -1,0 +1,8 @@
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_general\temp_plot.plt" line 21: non-integer passed to boolean operator
+
+*** FIT ERROR ***
+PYFIT ax 44.51 0
+PYFIT bx 89.02 0
+PYFIT c 133.53 0
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_general\temp_plot.plt" line 42: non-integer passed to boolean operator
+

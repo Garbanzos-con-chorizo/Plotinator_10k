@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import subprocess
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict
 
@@ -286,6 +287,7 @@ def run_job(
         dispatcher.emit("job-start", timestamp=ts, total=len(plots), output_dir=base_output)
 
         results: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
         futures: dict[Any, dict] = {}
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
@@ -299,10 +301,18 @@ def run_job(
                     result = future.result()
                 except Exception as exc:  # noqa: BLE001 - propagate with logging
                     dispatcher.emit("plot-error", title=title, error=str(exc))
+                    error_details: dict[str, Any] = {
+                        "title": title,
+                        "error": str(exc),
+                    }
+                    tb = traceback.format_exception(type(exc), exc, exc.__traceback__)
+                    if tb:
+                        error_details["traceback"] = "".join(tb)
+                    errors.append(error_details)
                     continue
                 results.append(result)
 
-        all_results = {"timestamp": ts, "results": results}
+        all_results = {"timestamp": ts, "results": results, "errors": errors}
         json_path = os.path.join(base_output, "fit_results.json")
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(all_results, f, indent=2, ensure_ascii=False)
@@ -345,6 +355,7 @@ def run_job(
             results_path=json_path,
             markdown_path=markdown_path,
             pdf_path=pdf_path,
+            errors=errors,
         )
 
         return {
@@ -354,6 +365,7 @@ def run_job(
             "results_path": json_path,
             "markdown_path": markdown_path,
             "pdf_path": pdf_path,
+            "errors": errors,
         }
     except Exception as exc:
         dispatcher.emit("job-error", error=str(exc))
