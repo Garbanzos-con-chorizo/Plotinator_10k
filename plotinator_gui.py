@@ -132,10 +132,27 @@ class PlotinatorApp(ttkb.Window):
         self._progress_completed = 0
         self.status_var = tk.StringVar(self, value="Idle")
         self._images: dict[str, tk.PhotoImage] = {}
+        self._content_paned: ttkb.Panedwindow | None = None
+        self._preview_container: ttkb.Frame | None = None
+        self._preview_header_var = tk.StringVar(self, value="Preview")
+        self._preview_notebook: ttkb.Notebook | None = None
+        self._preview_plot_tab: ttkb.Frame | None = None
+        self._preview_canvas: tk.Canvas | None = None
+        self._preview_canvas_image: int | None = None
+        self._preview_canvas_message: int | None = None
+        self._preview_residual_label: ttkb.Label | None = None
+        self._preview_summary_vars: dict[str, tk.StringVar] = {}
+        self._preview_photo_main: tk.PhotoImage | None = None
+        self._preview_photo_residual: tk.PhotoImage | None = None
+        self._preview_pane_visible = False
+        self._current_output_dir: Path | None = None
+        self._current_preview_title: str | None = None
+        self._latest_preview_title: str | None = None
         self._available_data_files: list[Path] = []
         self._load_images()
 
         self._create_widgets()
+        self._hide_preview_pane()
         self.tree.bind("<Double-1>", self.on_double_click)
         self.load_config()
 
@@ -170,8 +187,18 @@ class PlotinatorApp(ttkb.Window):
                 kwargs.update({"image": toolbar_logo, "compound": "left", "padding": (6, 4)})
             ttkb.Button(toolbar, **kwargs).pack(side="left", padx=4)
 
-        table_frame = ttkb.Frame(self, padding=10)
-        table_frame.pack(fill="both", expand=True)
+        content_paned = ttkb.Panedwindow(self, orient="horizontal")
+        content_paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._content_paned = content_paned
+
+        queue_frame = ttkb.Frame(content_paned, padding=0)
+        queue_frame.columnconfigure(0, weight=1)
+        queue_frame.rowconfigure(0, weight=3)
+        queue_frame.rowconfigure(1, weight=2)
+        content_paned.add(queue_frame, weight=3)
+
+        table_frame = ttkb.Frame(queue_frame, padding=10)
+        table_frame.grid(row=0, column=0, sticky="nsew")
         columns = ("Title", "Formula", "Datasets", "Residuals")
         self.tree = ttkb.Treeview(
             table_frame,
@@ -184,6 +211,25 @@ class PlotinatorApp(ttkb.Window):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
+
+        log_frame = ttkb.Labelframe(queue_frame, padding=10)
+        if (log_icon := self._images.get("toolbar_log")) is not None:
+            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
+            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
+            log_frame.configure(labelwidget=log_label)
+        else:
+            log_frame.configure(text="Batch log")
+        log_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0))
+        self.log_text = tk.Text(
+            log_frame,
+            height=10,
+            bg="#101820",
+            fg="#39FF14",
+            insertbackground="#39FF14",
+        )
+        self.log_text.pack(fill="both", expand=True)
+
+        self._preview_container = self._build_preview_container(content_paned)
 
         progress_frame = ttkb.Frame(self, padding=(10, 0))
         progress_frame.pack(fill="x")
@@ -198,22 +244,340 @@ class PlotinatorApp(ttkb.Window):
         )
         self.progress.pack(fill="x")
 
-        log_frame = ttkb.Labelframe(self, padding=10)
-        if (log_icon := self._images.get("toolbar_log")) is not None:
-            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
-            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
-            log_frame.configure(labelwidget=log_label)
-        else:
-            log_frame.configure(text="Batch log")
-        log_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_text = tk.Text(
-            log_frame,
-            height=10,
-            bg="#101820",
-            fg="#39FF14",
-            insertbackground="#39FF14",
+    # ------------------------------------------------------------------
+    def _build_preview_container(self, parent: ttkb.Panedwindow) -> ttkb.Frame:
+        container = ttkb.Frame(parent, padding=10)
+        container.columnconfigure(0, weight=1)
+
+        header = ttkb.Label(
+            container,
+            textvariable=self._preview_header_var,
+            font=("Segoe UI", 14, "bold"),
+            anchor="w",
         )
-        self.log_text.pack(fill="both", expand=True)
+        header.pack(anchor="w")
+
+        notebook = ttkb.Notebook(container)
+        notebook.pack(fill="both", expand=True, pady=(8, 0))
+        self._preview_notebook = notebook
+
+        plot_tab = ttkb.Frame(notebook)
+        plot_tab.columnconfigure(0, weight=1)
+        plot_tab.rowconfigure(0, weight=1)
+        notebook.add(plot_tab, text="Plot")
+        self._preview_plot_tab = plot_tab
+
+        canvas_frame = ttkb.Frame(plot_tab)
+        canvas_frame.grid(row=0, column=0, sticky="nsew")
+        canvas_frame.columnconfigure(0, weight=1)
+        canvas_frame.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(canvas_frame, background="#0C1F2C", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttkb.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttkb.Scrollbar(canvas_frame, orient="horizontal", command=canvas.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self._preview_canvas = canvas
+
+        residuals_tab = ttkb.Frame(notebook, padding=12)
+        notebook.add(residuals_tab, text="Residuals")
+        residual_label = ttkb.Label(
+            residuals_tab,
+            text="Residual preview not available yet.",
+            anchor="center",
+            justify="center",
+            wraplength=280,
+        )
+        residual_label.pack(fill="both", expand=True)
+        self._preview_residual_label = residual_label
+
+        summary_tab = ttkb.Frame(notebook, padding=12)
+        summary_tab.columnconfigure(1, weight=1)
+        notebook.add(summary_tab, text="Summary")
+
+        summary_fields = [
+            ("χ²", "chi2"),
+            ("Reduced χ²", "reduced_chi2"),
+            ("RMS", "rms"),
+            ("Mean residual", "mean"),
+            ("Std residual", "std"),
+            ("Fit errors", "fit_error"),
+        ]
+        for row, (label_text, key) in enumerate(summary_fields):
+            ttkb.Label(summary_tab, text=label_text).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 10),
+                pady=4,
+            )
+            var = tk.StringVar(value="—")
+            self._preview_summary_vars[key] = var
+            ttkb.Label(
+                summary_tab,
+                textvariable=var,
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+                justify="left",
+                wraplength=260,
+            ).grid(row=row, column=1, sticky="ew", pady=4)
+
+        self._update_preview_message("Preview will appear once a fit starts.")
+        return container
+
+    # ------------------------------------------------------------------
+    def _update_preview_message(self, message: str) -> None:
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        self._preview_canvas_image = None
+        self._preview_canvas_message = canvas.create_text(
+            16,
+            16,
+            anchor="nw",
+            text=message,
+            fill="#F8F9FA",
+            font=("Segoe UI", 11),
+        )
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas.winfo_height()))
+
+    # ------------------------------------------------------------------
+    def _show_preview_image(self, image: tk.PhotoImage) -> None:
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        self._preview_canvas_message = None
+        self._preview_canvas_image = canvas.create_image(0, 0, anchor="nw", image=image)
+        canvas.configure(scrollregion=(0, 0, image.width(), image.height()))
+
+    # ------------------------------------------------------------------
+    def _clear_preview_summary(self) -> None:
+        for var in self._preview_summary_vars.values():
+            var.set("—")
+
+    # ------------------------------------------------------------------
+    def _ensure_preview_pane(self) -> None:
+        if self._content_paned is None or self._preview_container is None:
+            return
+        if not self._preview_pane_visible:
+            try:
+                self._content_paned.add(self._preview_container, weight=2)
+            except tk.TclError:
+                return
+            self._preview_pane_visible = True
+        if self._preview_notebook is not None and self._preview_plot_tab is not None:
+            self._preview_notebook.select(self._preview_plot_tab)
+
+    # ------------------------------------------------------------------
+    def _hide_preview_pane(self) -> None:
+        if self._content_paned is None or self._preview_container is None:
+            return
+        if self._preview_pane_visible:
+            try:
+                self._content_paned.forget(self._preview_container)
+            except tk.TclError:
+                pass
+            self._preview_pane_visible = False
+        self._preview_header_var.set("Preview")
+        self._update_preview_message("Preview will appear once a fit starts.")
+        self._clear_preview_summary()
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview not available yet.",
+            )
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_preview_title = None
+        self._latest_preview_title = None
+
+    # ------------------------------------------------------------------
+    def _update_main_image_from_path(self, path: Path | str | None) -> bool:
+        if path in (None, ""):
+            return False
+        candidate = Path(str(path))
+        if not candidate.exists():
+            return False
+        try:
+            image = tk.PhotoImage(file=candidate.as_posix())
+        except tk.TclError:
+            return False
+        self._preview_photo_main = image
+        self._show_preview_image(image)
+        return True
+
+    # ------------------------------------------------------------------
+    def _update_residual_image_from_path(self, path: Path | str | None) -> bool:
+        label = self._preview_residual_label
+        if label is None:
+            return False
+        if path in (None, ""):
+            label.configure(image="", text="Residual preview not generated for this fit.")
+            self._preview_photo_residual = None
+            return False
+        candidate = Path(str(path))
+        if not candidate.exists():
+            label.configure(image="", text="Residual preview not generated for this fit.")
+            self._preview_photo_residual = None
+            return False
+        try:
+            image = tk.PhotoImage(file=candidate.as_posix())
+        except tk.TclError:
+            label.configure(image="", text="Residual preview failed to load.")
+            self._preview_photo_residual = None
+            return False
+        if max(image.width(), image.height()) > 320:
+            image = self._scale_image(image, 320)
+        self._preview_photo_residual = image
+        label.configure(image=image, text="")
+        return True
+
+    # ------------------------------------------------------------------
+    def _load_preview_images(self, title: str) -> None:
+        base = self._current_output_dir
+        if base is None:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+            return
+        safe_title = title.replace(" ", "_")
+        plot_dir = base / f"plot_{safe_title}"
+        plot_loaded = self._update_main_image_from_path(plot_dir / "plot.png")
+        if not plot_loaded:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+        self._update_residual_image_from_path(plot_dir / "residuals.png")
+
+    # ------------------------------------------------------------------
+    def _set_summary_value(self, key: str, value: Any) -> None:
+        var = self._preview_summary_vars.get(key)
+        if var is None:
+            return
+        if value in (None, ""):
+            var.set("—")
+            return
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            var.set(str(value))
+            return
+        if math.isnan(numeric):
+            var.set("—")
+            return
+        var.set(f"{numeric:.4g}")
+
+    # ------------------------------------------------------------------
+    def _apply_preview_result_data(self, result: dict[str, Any]) -> None:
+        metrics = result.get("metrics") or {}
+        self._set_summary_value("chi2", metrics.get("chi_squared") or metrics.get("chi2") or metrics.get("chisq"))
+        self._set_summary_value(
+            "reduced_chi2",
+            metrics.get("reduced_chi_squared")
+            or metrics.get("reduced_chi2")
+            or metrics.get("reduced_chisq"),
+        )
+        self._set_summary_value("rms", metrics.get("rmse") or metrics.get("rms"))
+        self._set_summary_value("mean", metrics.get("mean"))
+        self._set_summary_value("std", metrics.get("std"))
+
+        parameters = result.get("parameters") or {}
+        fit_errors: list[str] = []
+        for name, payload in parameters.items():
+            if not isinstance(payload, dict):
+                continue
+            error = payload.get("error")
+            if error in (None, ""):
+                continue
+            try:
+                fit_errors.append(f"{name} ± {float(error):.3g}")
+            except (TypeError, ValueError):
+                fit_errors.append(f"{name} ± {error}")
+        summary = ", ".join(fit_errors) if fit_errors else "—"
+        fit_var = self._preview_summary_vars.get("fit_error")
+        if fit_var is not None:
+            fit_var.set(summary)
+
+    # ------------------------------------------------------------------
+    def _load_preview_from_result(self, result: dict[str, Any]) -> None:
+        plot_path = result.get("output_plot") or (result.get("canvases") or {}).get("combined")
+        residual_path = result.get("residuals_plot") or (result.get("canvases") or {}).get("residuals")
+        plot_loaded = self._update_main_image_from_path(plot_path)
+        if not plot_loaded and self._current_preview_title:
+            self._load_preview_images(self._current_preview_title)
+        self._update_residual_image_from_path(residual_path)
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_start(self, title: str) -> None:
+        self._ensure_preview_pane()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._update_preview_message(f"Preparing preview for \"{title}\"…")
+        self._clear_preview_summary()
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview will appear after the fit completes.",
+            )
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_preview_title = title
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_complete(self, title: str) -> None:
+        self._ensure_preview_pane()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._latest_preview_title = title
+        self._current_preview_title = title
+        self._load_preview_images(title)
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_error(self, title: str, error: str) -> None:
+        self._ensure_preview_pane()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._update_preview_message(f"Preview unavailable: {error}")
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview unavailable due to error.",
+            )
+        self._clear_preview_summary()
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+
+    # ------------------------------------------------------------------
+    def _on_preview_job_complete(self, event: dict[str, Any]) -> None:
+        results: list[dict[str, Any]] = event.get("results") or []
+        if not results:
+            return
+        target_title = self._latest_preview_title or results[-1].get("title")
+        if not target_title:
+            return
+        for result in results:
+            if result.get("title") == target_title:
+                self._preview_header_var.set(f"Preview: {target_title}")
+                self._ensure_preview_pane()
+                self._apply_preview_result_data(result)
+                self._load_preview_from_result(result)
+                break
+
+    # ------------------------------------------------------------------
+    def _on_preview_job_failure(self, message: str) -> None:
+        self._ensure_preview_pane()
+        self._preview_header_var.set("Preview")
+        self._update_preview_message(message)
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(image="", text="Residual preview unavailable.")
+        self._clear_preview_summary()
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_output_dir = None
+        self._current_preview_title = None
+        self._latest_preview_title = None
+
+    # ------------------------------------------------------------------
+    def _reset_preview_state(self) -> None:
+        self._current_output_dir = None
+        self._hide_preview_pane()
 
     # ------------------------------------------------------------------
     def _scale_image(self, image: tk.PhotoImage, target: int) -> tk.PhotoImage:
@@ -415,6 +779,7 @@ class PlotinatorApp(ttkb.Window):
         self.save_config()
         self.progress.configure(value=0)
         self.log_text.delete("1.0", tk.END)
+        self._reset_preview_state()
         self._progress_total = 0
         self._progress_completed = 0
         self._worker = BatchWorker(self.config_path)
@@ -494,12 +859,22 @@ class PlotinatorApp(ttkb.Window):
             ts = event.get("timestamp", "")
             self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
             self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
+            output_dir = event.get("output_dir")
+            if output_dir:
+                try:
+                    self._current_output_dir = Path(str(output_dir)).resolve()
+                except OSError:
+                    self._current_output_dir = Path(str(output_dir))
+            else:
+                self._current_output_dir = None
+            self._latest_preview_title = None
             return
 
         if etype == "plot-start":
             title = event.get("title", "Untitled")
             self._append_log(f"[RUN] Processing: {title}\n")
             self._set_status(f"Processing plot: {title}")
+            self._on_preview_plot_start(title)
             return
 
         if etype == "plot-complete":
@@ -511,6 +886,7 @@ class PlotinatorApp(ttkb.Window):
             self._set_status(
                 f"Completed {self._progress_completed}/{total_display}: {title}"
             )
+            self._on_preview_plot_complete(title)
             return
 
         if etype == "plot-error":
@@ -521,6 +897,7 @@ class PlotinatorApp(ttkb.Window):
             self._append_log(f"[X] Error in {title}: {error_msg}\n")
             self.show_toast(f"Plot failed: {title}", level="error")
             self._set_status(f"Plot error: {title}")
+            self._on_preview_plot_error(title, error_msg)
             return
 
         if etype == "report-markdown-ready":
@@ -557,6 +934,7 @@ class PlotinatorApp(ttkb.Window):
                 self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
             self._set_status("Batch complete")
+            self._on_preview_job_complete(event)
             self._event_queue = None
             self._worker = None
             return
@@ -567,6 +945,7 @@ class PlotinatorApp(ttkb.Window):
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
+            self._on_preview_job_failure(error_msg)
             self._event_queue = None
             self._worker = None
             return
@@ -577,6 +956,7 @@ class PlotinatorApp(ttkb.Window):
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
+            self._on_preview_job_failure(error_msg)
             self._event_queue = None
             self._worker = None
             return
@@ -585,6 +965,7 @@ class PlotinatorApp(ttkb.Window):
             self._append_log("[CANCELLED] Batch cancelled by user.\n")
             self.show_toast("Batch cancelled", level="warning")
             self._set_status("Batch cancelled")
+            self._on_preview_job_failure("Batch cancelled")
             self._event_queue = None
             self._worker = None
             return
