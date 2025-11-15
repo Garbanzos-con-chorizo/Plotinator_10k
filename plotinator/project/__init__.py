@@ -10,13 +10,23 @@ from .migration import (
 )
 from .manager import FilesystemCallback, ProjectManager
 from .models import PlotinatorProject, ProjectMetadata, ProjectPaths
+from .validation import (
+    ProjectValidationError,
+    ValidationIssue,
+    ValidationResult,
+    validate_project,
+)
 
 __all__ = [
     "PlotinatorProject",
     "ProjectMetadata",
     "ProjectPaths",
     "ProjectManager",
+    "validate_project",
     "FilesystemCallback",
+    "ProjectValidationError",
+    "ValidationResult",
+    "ValidationIssue",
     "import_data_file",
     "DataFileExistsError",
     "DataImportError",

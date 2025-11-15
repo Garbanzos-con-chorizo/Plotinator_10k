@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from config.schema import PlotinatorConfig
-from plotinator.project import DataFileExistsError, ProjectManager
+from plotinator.project import ProjectManager, ProjectValidationError, DataFileExistsError
 
 
 def _write_legacy_config(root: Path) -> None:
@@ -121,6 +121,48 @@ def test_open_project_migrates_legacy_workspace(tmp_path: Path) -> None:
     assert manager.dirty is False
 
 
+def test_open_project_rejects_incomplete_structure(tmp_path: Path) -> None:
+    project_root = tmp_path / "broken.p10k"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    (project_root / "fits.json").write_text("[]", encoding="utf-8")
+    for folder in ("data", "plots", "exports"):
+        (project_root / folder).mkdir()
+
+    manager = ProjectManager()
+
+    with pytest.raises(ProjectValidationError) as excinfo:
+        manager.open_project(project_root)
+
+    issues = excinfo.value.result.issues
+    assert any(issue.subject == "settings" for issue in issues)
+
+
+def test_open_project_reports_invalid_json(tmp_path: Path) -> None:
+    project_root = tmp_path / "invalid-json.p10k"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    (project_root / "settings.json").write_text("{}", encoding="utf-8")
+    (project_root / "fits.json").write_text("{", encoding="utf-8")
+    for folder in ("data", "plots", "exports"):
+        (project_root / folder).mkdir()
+
+    manager = ProjectManager()
+
+    with pytest.raises(ProjectValidationError) as excinfo:
+        manager.open_project(project_root)
+
+    issue = excinfo.value.result.issues[0]
+    assert issue.code == "invalid-json"
+    assert issue.path == project_root / "fits.json"
+
+
+def test_save_project_rejects_missing_dataset(tmp_path: Path) -> None:
+    manager = ProjectManager()
+    project = manager.new_project(tmp_path / "dangling.p10k")
+
+    data_file = manager.data_path("input.csv")
+    data_file.write_text("x,y\n1,2\n", encoding="utf-8")
 def test_import_data_file_updates_available_cache(tmp_path: Path) -> None:
     manager = ProjectManager()
     manager.new_project(tmp_path / "cache.p10k")
