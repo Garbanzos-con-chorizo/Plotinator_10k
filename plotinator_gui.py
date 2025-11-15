@@ -148,6 +148,11 @@ class PlotinatorApp(ttkb.Window):
         self._preview_active_temp_dir: Path | None = None
         self._preview_stale_temp_dirs: set[Path] = set()
         self._preview_pane_visible = False
+        self._preview_history: list[dict[str, Any]] = []
+        self._preview_history_index: int | None = None
+        self._preview_history_limit = 5
+        self._preview_prev_button: ttkb.Button | None = None
+        self._preview_next_button: ttkb.Button | None = None
         self._current_output_dir: Path | None = None
         self._current_preview_title: str | None = None
         self._latest_preview_title: str | None = None
@@ -260,6 +265,27 @@ class PlotinatorApp(ttkb.Window):
         )
         header.pack(anchor="w")
 
+        controls = ttkb.Frame(container)
+        controls.pack(fill="x", pady=(4, 0))
+        prev_button = ttkb.Button(
+            controls,
+            text="◀ Previous",
+            bootstyle="secondary-outline",
+            command=self._show_previous_preview,
+            width=14,
+        )
+        prev_button.pack(side="left")
+        next_button = ttkb.Button(
+            controls,
+            text="Next ▶",
+            bootstyle="secondary-outline",
+            command=self._show_next_preview,
+            width=14,
+        )
+        next_button.pack(side="right")
+        self._preview_prev_button = prev_button
+        self._preview_next_button = next_button
+
         notebook = ttkb.Notebook(container)
         notebook.pack(fill="both", expand=True, pady=(8, 0))
         self._preview_notebook = notebook
@@ -328,6 +354,7 @@ class PlotinatorApp(ttkb.Window):
             ).grid(row=row, column=1, sticky="ew", pady=4)
 
         self._update_preview_message("Preview will appear once a fit starts.")
+        self._update_preview_history_buttons()
         return container
 
     # ------------------------------------------------------------------
@@ -393,7 +420,8 @@ class PlotinatorApp(ttkb.Window):
             return
         if directory == self._preview_active_temp_dir:
             return
-        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        if not self._is_preview_dir_in_history(self._preview_active_temp_dir):
+            self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
         self._preview_active_temp_dir = directory
 
     # ------------------------------------------------------------------
@@ -417,6 +445,115 @@ class PlotinatorApp(ttkb.Window):
         if not plot_loaded:
             self._update_preview_message(f"Preview not available for \"{title}\".")
         self._update_residual_image_from_path(result.get("residuals_plot"))
+
+    # ------------------------------------------------------------------
+    def _extract_cleanup_dir(self, payload: dict[str, Any] | None) -> Path | None:
+        if not isinstance(payload, dict):
+            return None
+        cleanup_dir = payload.get("cleanup_dir")
+        if not cleanup_dir:
+            return None
+        try:
+            return Path(str(cleanup_dir))
+        except (TypeError, ValueError, OSError):
+            return None
+
+    # ------------------------------------------------------------------
+    def _is_preview_dir_in_history(self, directory: Path | None) -> bool:
+        if directory is None:
+            return False
+        for entry in self._preview_history:
+            history_dir = self._extract_cleanup_dir(entry.get("preview"))
+            if history_dir is not None and history_dir == directory:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    def _record_preview_history(
+        self,
+        title: str,
+        payload: dict[str, Any] | None,
+        result: dict[str, Any] | None,
+    ) -> None:
+        payload_copy = copy.deepcopy(payload) if isinstance(payload, dict) else None
+        result_copy = copy.deepcopy(result) if isinstance(result, dict) else None
+
+        history = self._preview_history
+        removed_forward: list[dict[str, Any]] = []
+        if self._preview_history_index is None:
+            if history:
+                removed_forward = history[:]
+            history.clear()
+        elif self._preview_history_index < len(history) - 1:
+            removed_forward = history[self._preview_history_index + 1 :]
+            del history[self._preview_history_index + 1 :]
+
+        for entry in removed_forward:
+            cleanup_dir = self._extract_cleanup_dir(entry.get("preview"))
+            if cleanup_dir is not None and cleanup_dir != self._preview_active_temp_dir:
+                self._queue_preview_temp_cleanup(cleanup_dir)
+
+        history.append({"title": title, "preview": payload_copy, "result": result_copy})
+
+        while len(history) > self._preview_history_limit:
+            removed_entry = history.pop(0)
+            cleanup_dir = self._extract_cleanup_dir(removed_entry.get("preview"))
+            if cleanup_dir is not None and cleanup_dir != self._preview_active_temp_dir:
+                self._queue_preview_temp_cleanup(cleanup_dir)
+
+        self._preview_history_index = len(history) - 1
+        self._update_preview_history_buttons()
+
+    # ------------------------------------------------------------------
+    def _update_preview_history_buttons(self) -> None:
+        prev_button = self._preview_prev_button
+        next_button = self._preview_next_button
+        history = self._preview_history
+        index = self._preview_history_index if self._preview_history_index is not None else -1
+
+        if prev_button is not None:
+            if index > 0:
+                prev_button.state(["!disabled"])
+            else:
+                prev_button.state(["disabled"])
+
+        if next_button is not None:
+            if 0 <= index < len(history) - 1:
+                next_button.state(["!disabled"])
+            else:
+                next_button.state(["disabled"])
+
+    # ------------------------------------------------------------------
+    def _show_previous_preview(self) -> None:
+        if self._preview_history_index is None or self._preview_history_index <= 0:
+            return
+        self._preview_history_index -= 1
+        entry = self._preview_history[self._preview_history_index]
+        self.render_batch_preview(
+            entry.get("title", "Untitled"),
+            entry.get("preview"),
+            entry.get("result"),
+            record_history=False,
+            show_notifications=False,
+        )
+        self._update_preview_history_buttons()
+
+    # ------------------------------------------------------------------
+    def _show_next_preview(self) -> None:
+        if self._preview_history_index is None:
+            return
+        if self._preview_history_index >= len(self._preview_history) - 1:
+            return
+        self._preview_history_index += 1
+        entry = self._preview_history[self._preview_history_index]
+        self.render_batch_preview(
+            entry.get("title", "Untitled"),
+            entry.get("preview"),
+            entry.get("result"),
+            record_history=False,
+            show_notifications=False,
+        )
+        self._update_preview_history_buttons()
 
     # ------------------------------------------------------------------
     def _ensure_preview_pane(self) -> None:
@@ -453,6 +590,14 @@ class PlotinatorApp(ttkb.Window):
         self._preview_photo_residual = None
         self._current_preview_title = None
         self._latest_preview_title = None
+        if self._preview_history:
+            for entry in self._preview_history:
+                cleanup_dir = self._extract_cleanup_dir(entry.get("preview"))
+                if cleanup_dir is not None:
+                    self._preview_stale_temp_dirs.add(cleanup_dir)
+            self._preview_history.clear()
+        self._preview_history_index = None
+        self._update_preview_history_buttons()
         self._cleanup_all_preview_temp_dirs()
 
     # ------------------------------------------------------------------
@@ -568,6 +713,93 @@ class PlotinatorApp(ttkb.Window):
         self._update_residual_image_from_path(residual_path)
 
     # ------------------------------------------------------------------
+    def render_batch_preview(
+        self,
+        title: str,
+        preview_payload: dict[str, Any] | None,
+        result_payload: dict[str, Any] | None = None,
+        *,
+        record_history: bool = True,
+        show_notifications: bool = True,
+    ) -> None:
+        payload_copy = copy.deepcopy(preview_payload) if isinstance(preview_payload, dict) else None
+        result_override = copy.deepcopy(result_payload) if isinstance(result_payload, dict) else None
+
+        if payload_copy and result_override and not isinstance(payload_copy.get("result"), dict):
+            payload_copy["result"] = copy.deepcopy(result_override)
+
+        self._ensure_preview_pane()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._current_preview_title = title
+        if record_history:
+            self._latest_preview_title = title
+
+        if payload_copy:
+            self._activate_preview_temp_dir(payload_copy)
+        else:
+            if not self._is_preview_dir_in_history(self._preview_active_temp_dir):
+                self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+            self._preview_active_temp_dir = None
+
+        result_data: dict[str, Any] | None = None
+        if payload_copy:
+            try:
+                result_data = self._result_from_preview_payload(payload_copy)
+            except Exception as exc:  # noqa: BLE001 - surface via notification
+                result_data = None
+                if show_notifications:
+                    self.show_toast(f"Preview data unavailable for {title}", level="warning")
+                self._append_log(f"[PREVIEW] Failed to parse preview payload for {title}: {exc}\n")
+
+        if result_data is None and result_override is not None:
+            result_data = result_override
+
+        if result_data:
+            self._apply_preview_result_data(result_data)
+        else:
+            self._clear_preview_summary()
+
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        main_loaded = False
+        residual_loaded = False
+        used_fallback = False
+        plot_path = result_data.get("output_plot") if isinstance(result_data, dict) else None
+        residual_path = result_data.get("residuals_plot") if isinstance(result_data, dict) else None
+
+        if plot_path:
+            main_loaded = self._update_main_image_from_path(plot_path)
+            if not main_loaded and show_notifications:
+                self.show_toast(f"Preview image missing for {title}", level="warning")
+        else:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+
+        if not main_loaded:
+            if self._current_output_dir is not None:
+                self._load_preview_images(title)
+                if self._preview_canvas_image is not None:
+                    used_fallback = True
+                    main_loaded = True
+            if not main_loaded:
+                self._preview_photo_main = None
+                if show_notifications and (plot_path or payload_copy or result_override):
+                    self.show_toast(f"Preview not available for {title}", level="info")
+
+        if residual_path and not used_fallback:
+            residual_loaded = self._update_residual_image_from_path(residual_path)
+            if not residual_loaded and show_notifications:
+                self.show_toast(f"Residual preview missing for {title}", level="info")
+        elif not used_fallback:
+            self._update_residual_image_from_path(None)
+
+        if record_history:
+            self._record_preview_history(title, payload_copy, result_data)
+        else:
+            self._update_preview_history_buttons()
+
+        self._cleanup_stale_preview_dirs()
+
+    # ------------------------------------------------------------------
     def _on_preview_plot_start(self, title: str) -> None:
         self._ensure_preview_pane()
         self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
@@ -589,16 +821,7 @@ class PlotinatorApp(ttkb.Window):
     def _on_preview_plot_complete(
         self, title: str, payload: dict[str, Any] | None = None
     ) -> None:
-        self._ensure_preview_pane()
-        self._preview_header_var.set(f"Preview: {title}")
-        self._latest_preview_title = title
-        self._current_preview_title = title
-        if payload:
-            self._activate_preview_temp_dir(payload)
-            self._load_preview_from_payload(payload, title)
-        else:
-            self._load_preview_images(title)
-        self._cleanup_stale_preview_dirs()
+        self.render_batch_preview(title, payload)
 
     # ------------------------------------------------------------------
     def _on_preview_plot_error(self, title: str, error: str) -> None:
@@ -963,12 +1186,16 @@ class PlotinatorApp(ttkb.Window):
             preview_payload = event.get("preview")
             if isinstance(preview_payload, dict):
                 preview_payload = dict(preview_payload)
-                result_payload = event.get("result")
-                if isinstance(result_payload, dict):
-                    preview_payload.setdefault("result", result_payload)
             else:
                 preview_payload = None
-            self._on_preview_plot_complete(title, preview_payload)
+            result_payload = event.get("result")
+            if isinstance(result_payload, dict):
+                result_payload = dict(result_payload)
+                if preview_payload is not None:
+                    preview_payload.setdefault("result", result_payload)
+            else:
+                result_payload = None
+            self.render_batch_preview(title, preview_payload, result_payload)
             return
 
         if etype == "plot-error":
