@@ -23,7 +23,8 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "ttkbootstrap>=1.10",
-    "pypandoc>=1.10"
+    "pypandoc>=1.10",
+    "packaging>=23.0"
 ]
 
 [project.optional-dependencies]
