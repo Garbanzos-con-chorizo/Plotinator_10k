@@ -137,7 +137,7 @@ class PlotinatorApp(ttkb.Window):
         self.folder: Path | None = None
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
-        self._project_manager = ProjectManager()
+        self.project_manager = ProjectManager(filesystem_callbacks=[self._on_project_filesystem_update])
         self._project: PlotinatorProject | None = None
         self._app_state = WorkspaceState.load()
         self._autosave_after_id: str | None = None
@@ -1447,7 +1447,7 @@ class PlotinatorApp(ttkb.Window):
     # ------------------------------------------------------------------
     def _handle_import_data_file(self, source: Path) -> Path:
         try:
-            imported = self._project_manager.import_data_file(source)
+            imported = self.project_manager.import_data_file(source)
         except Exception as exc:  # noqa: BLE001 - surfaced to caller
             self._append_log(f"[DATA] Failed to import {source}: {exc}\n")
             raise
@@ -1481,7 +1481,7 @@ class PlotinatorApp(ttkb.Window):
         project: PlotinatorProject | None = None
         for candidate in candidates:
             try:
-                project = self._project_manager.open_project(candidate)
+                project = self.project_manager.open_project(candidate)
             except FileNotFoundError:
                 continue
             except Exception as exc:
@@ -1491,7 +1491,7 @@ class PlotinatorApp(ttkb.Window):
             if project.paths.root.name == TEMP_PROJECT_FOLDER:
                 target_root = candidate if candidate.is_dir() else candidate.parent
                 try:
-                    project = self._project_manager.save_project_as_dialog(target_root)
+                    project = self.project_manager.save_project_as_dialog(target_root)
                 except Exception as exc:  # noqa: BLE001 - surfaced to UI
                     self.show_toast("Project migration failed", level="error")
                     messagebox.showerror(
@@ -1508,10 +1508,10 @@ class PlotinatorApp(ttkb.Window):
 
         fallback_root = Path.home() / "Plotinator Projects" / "Untitled Project.p10k"
         try:
-            project = self._project_manager.new_project(fallback_root)
+            project = self.project_manager.new_project(fallback_root)
         except Exception:  # noqa: BLE001 - fallback to application directory
             alt_root = default_root / "Untitled Project.p10k"
-            project = self._project_manager.new_project(alt_root)
+            project = self.project_manager.new_project(alt_root)
 
         self._apply_project(project, record_state=True)
         self._write_engine_config(project)
@@ -1544,7 +1544,7 @@ class PlotinatorApp(ttkb.Window):
     def _open_project_path(self, path: Path, *, record_state: bool = True) -> None:
         target = Path(path)
         try:
-            project = self._project_manager.open_project(target)
+            project = self.project_manager.open_project(target)
         except FileNotFoundError:
             self.show_toast("Project not found", level="error")
             messagebox.showerror("Plotinator", f"No project located at {target}", parent=self)
@@ -1557,7 +1557,7 @@ class PlotinatorApp(ttkb.Window):
         if project.paths.root.name == TEMP_PROJECT_FOLDER:
             target_root = target if target.is_dir() else target.parent
             try:
-                project = self._project_manager.save_project_as_dialog(target_root)
+                project = self.project_manager.save_project_as_dialog(target_root)
             except Exception as exc:  # noqa: BLE001 - surfaced to UI
                 self.show_toast("Project migration failed", level="error")
                 messagebox.showerror(
@@ -1658,7 +1658,7 @@ class PlotinatorApp(ttkb.Window):
                 return
 
         try:
-            project = self._project_manager.new_project(target_path)
+            project = self.project_manager.new_project(target_path)
         except Exception as exc:  # noqa: BLE001 - surfaced to UI
             self.show_toast("Failed to create project", level="error")
             messagebox.showerror("Plotinator", f"Unable to create project: {exc}", parent=self)
@@ -1721,7 +1721,7 @@ class PlotinatorApp(ttkb.Window):
             return
 
         try:
-            new_project = self._project_manager.save_project_as_dialog(target_path)
+            new_project = self.project_manager.save_project_as_dialog(target_path)
         except FileExistsError as exc:
             self.show_toast("Destination already exists", level="warning")
             messagebox.showerror("Plotinator", str(exc), parent=self)
@@ -1739,7 +1739,7 @@ class PlotinatorApp(ttkb.Window):
     # ------------------------------------------------------------------
     def _confirm_navigation(self) -> bool:
         self._update_project_from_job()
-        if not self._project_manager.dirty:
+        if not self.project_manager.dirty:
             return True
         result = messagebox.askyesnocancel(
             "Plotinator",
@@ -1785,7 +1785,7 @@ class PlotinatorApp(ttkb.Window):
             return
 
         self._update_project_from_job()
-        if not self._project_manager.dirty:
+        if not self.project_manager.dirty:
             self._schedule_autosave(reset=False)
             return
 
@@ -1793,7 +1793,7 @@ class PlotinatorApp(ttkb.Window):
 
         def _worker() -> None:
             try:
-                saved_project = self._project_manager.save_project()
+                saved_project = self.project_manager.save_project()
                 self._write_engine_config(saved_project)
             except Exception as exc:  # noqa: BLE001 - surfaced to UI
                 self.after(0, lambda e=exc: self._handle_save_failure(e, autosave=True))
@@ -1896,7 +1896,7 @@ class PlotinatorApp(ttkb.Window):
 
         self._update_project_from_job()
         try:
-            project = self._project_manager.save_project()
+            project = self.project_manager.save_project()
         except Exception as exc:  # noqa: BLE001 - surfaced to UI
             self._handle_save_failure(exc, autosave=False)
             return False
@@ -1973,7 +1973,7 @@ class PlotinatorApp(ttkb.Window):
             self.title(self._base_window_title)
             return
         label = project.metadata.label or project.paths.root.name
-        dirty_marker = " *" if self._project_manager.dirty else ""
+        dirty_marker = " *" if self.project_manager.dirty else ""
         self.title(f"{label}{dirty_marker} – {self._base_window_title}")
 
     # ------------------------------------------------------------------
