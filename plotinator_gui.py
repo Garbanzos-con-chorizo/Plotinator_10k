@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import queue
+import re
 import shutil
 import sys
 import threading
@@ -19,6 +20,7 @@ import ttkbootstrap as ttkb
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config
 from engine import run_batch as engine_run_batch
 from plotinator import __version__ as PACKAGE_VERSION
+from plotinator.project import PlotinatorProject, ProjectManager
 from plotinator.update_checker import ReleaseInfo, UpdateChecker, UpdateResult
 from plotinator.project import PlotinatorProject, ProjectManager, ProjectMetadata, ProjectPaths
 
@@ -124,16 +126,19 @@ class PlotinatorApp(ttkb.Window):
 
     def __init__(self) -> None:
         super().__init__(themename="superhero")
-        self.title(f"Plotinator Open Beta v{PACKAGE_VERSION}")
+        self._base_window_title = f"Plotinator Open Beta v{PACKAGE_VERSION}"
+        self.title(self._base_window_title)
         self.geometry("1200x800")
         self.resizable(True, True)
 
         base_style = getattr(self, "style", None)
         self._style = base_style if isinstance(base_style, ttkb.Style) else ttkb.Style()
-        self.project_manager = ProjectManager(filesystem_callbacks=[self._on_project_filesystem_update])
+        self.folder: Path | None = None
+        self._project_manager = ProjectManager()
         self._project: PlotinatorProject | None = None
-        self.job: PlotinatorConfig = PlotinatorConfig(base_path=Path.cwd(), fits=[])
-        self._engine_config_path: Path | None = None
+        self._project_location = Path(CONFIG_PATH).resolve().parent
+        self.config_path = self._project_location / CONFIG_PATH
+        self.job: PlotinatorConfig = PlotinatorConfig(base_path=self._project_location, fits=[])
         self._worker: BatchWorker | None = None
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
@@ -774,8 +779,28 @@ class PlotinatorApp(ttkb.Window):
             var.set("—")
 
     # ------------------------------------------------------------------
+    def _is_project_plot_directory(self, directory: Path | None) -> bool:
+        if directory is None:
+            return False
+        project = self._project
+        if project is None:
+            return False
+        try:
+            dir_resolved = directory.resolve()
+            plots_root = project.paths.plots_dir.resolve()
+        except FileNotFoundError:
+            return False
+        try:
+            dir_resolved.relative_to(plots_root)
+            return True
+        except ValueError:
+            return False
+
+    # ------------------------------------------------------------------
     def _queue_preview_temp_cleanup(self, directory: Path | None) -> None:
         if directory is None:
+            return
+        if self._is_project_plot_directory(directory):
             return
         self._preview_stale_temp_dirs.add(directory)
 
@@ -788,19 +813,17 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def _cleanup_all_preview_temp_dirs(self) -> None:
-        if self._preview_active_temp_dir is not None:
+        if self._preview_active_temp_dir is not None and not self._is_project_plot_directory(
+            self._preview_active_temp_dir
+        ):
             self._preview_stale_temp_dirs.add(self._preview_active_temp_dir)
-            self._preview_active_temp_dir = None
+        self._preview_active_temp_dir = None
         self._cleanup_stale_preview_dirs()
 
     # ------------------------------------------------------------------
     def _activate_preview_temp_dir(self, payload: dict[str, Any]) -> None:
-        cleanup_dir = payload.get("cleanup_dir")
-        if not cleanup_dir:
-            return
-        try:
-            directory = Path(str(cleanup_dir))
-        except (TypeError, ValueError, OSError):
+        directory = self._extract_cleanup_dir(payload)
+        if directory is None:
             return
         if directory == self._preview_active_temp_dir:
             return
@@ -822,6 +845,52 @@ class PlotinatorApp(ttkb.Window):
         }
 
     # ------------------------------------------------------------------
+    def _materialise_preview_assets(
+        self, title: str, payload: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if not payload:
+            return payload
+        project = self._project
+        if project is None:
+            return payload
+
+        copy_payload = copy.deepcopy(payload)
+        preview_root = project.paths.plots_dir / "previews"
+        try:
+            preview_root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return copy_payload
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = re.sub(r"[^A-Za-z0-9_-]+", "_", title).strip("_") or "preview"
+        dest_dir = preview_root / f"{timestamp}_{slug[:40]}"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        source_mapping = (
+            copy_payload.get("source") if isinstance(copy_payload.get("source"), dict) else {}
+        )
+        for key in ("output_plot", "residuals_plot"):
+            candidate = copy_payload.get(key) or source_mapping.get(key)
+            if not candidate:
+                continue
+            try:
+                candidate_path = Path(str(candidate))
+            except (TypeError, ValueError, OSError):
+                continue
+            if not candidate_path.exists():
+                continue
+            target_path = dest_dir / (candidate_path.name or f"{key}.png")
+            try:
+                shutil.copy2(candidate_path, target_path)
+            except OSError:
+                continue
+            copy_payload[key] = target_path.as_posix()
+
+        copy_payload["project_preview_dir"] = dest_dir.as_posix()
+        copy_payload["cleanup_dir"] = dest_dir.as_posix()
+        return copy_payload
+
+    # ------------------------------------------------------------------
     def _load_preview_from_payload(self, payload: dict[str, Any], title: str) -> None:
         result = self._result_from_preview_payload(payload)
         self._apply_preview_result_data(result)
@@ -834,7 +903,7 @@ class PlotinatorApp(ttkb.Window):
     def _extract_cleanup_dir(self, payload: dict[str, Any] | None) -> Path | None:
         if not isinstance(payload, dict):
             return None
-        cleanup_dir = payload.get("cleanup_dir")
+        cleanup_dir = payload.get("project_preview_dir") or payload.get("cleanup_dir")
         if not cleanup_dir:
             return None
         try:
@@ -977,7 +1046,7 @@ class PlotinatorApp(ttkb.Window):
         if self._preview_history:
             for entry in self._preview_history:
                 cleanup_dir = self._extract_cleanup_dir(entry.get("preview"))
-                if cleanup_dir is not None:
+                if cleanup_dir is not None and not self._is_project_plot_directory(cleanup_dir):
                     self._preview_stale_temp_dirs.add(cleanup_dir)
             self._preview_history.clear()
         self._preview_history_index = None
@@ -1107,6 +1176,7 @@ class PlotinatorApp(ttkb.Window):
         show_notifications: bool = True,
     ) -> None:
         payload_copy = copy.deepcopy(preview_payload) if isinstance(preview_payload, dict) else None
+        payload_copy = self._materialise_preview_assets(title, payload_copy)
         result_override = copy.deepcopy(result_payload) if isinstance(result_payload, dict) else None
 
         if payload_copy and result_override and not isinstance(payload_copy.get("result"), dict):
@@ -1310,14 +1380,10 @@ class PlotinatorApp(ttkb.Window):
         project = self._project
         if project is None:
             return None
-        data_dir = project.paths.data_dir
         try:
-            resolved = data_dir.resolve()
+            return project.paths.data_dir.resolve()
         except FileNotFoundError:
-            return data_dir
-        if resolved.exists():
-            return resolved
-        return data_dir
+            return project.paths.data_dir
 
     # ------------------------------------------------------------------
     def _refresh_available_data_files(self) -> None:
@@ -1334,6 +1400,17 @@ class PlotinatorApp(ttkb.Window):
         self._available_data_files = files
 
     # ------------------------------------------------------------------
+    def _handle_import_data_file(self, source: Path) -> Path:
+        try:
+            imported = self._project_manager.import_data_file(source)
+        except Exception as exc:  # noqa: BLE001 - surfaced to caller
+            self._append_log(f"[DATA] Failed to import {source}: {exc}\n")
+            raise
+        self._refresh_available_data_files()
+        self._update_dirty_ui()
+        return imported
+
+    # ------------------------------------------------------------------
     def toggle_theme(self) -> None:
         current = self._style.theme.name
         new_theme = "flatly" if current == "superhero" else "superhero"
@@ -1341,6 +1418,40 @@ class PlotinatorApp(ttkb.Window):
         self.show_toast(f"Theme switched to {new_theme.title()}")
 
     # ------------------------------------------------------------------
+    def load_config(self) -> None:
+        location = self._project_location
+        try:
+            project = self._project_manager.open_project(location)
+        except FileNotFoundError:
+            try:
+                project = self._project_manager.new_project(location)
+            except Exception as exc:  # noqa: BLE001 - surfaced to user
+                message = f"Failed to create project at {location}: {exc}"
+                self._append_log(f"[PROJECT] {message}\n")
+                self.show_toast(message, level="error")
+                return
+        except Exception as exc:  # noqa: BLE001 - surfaced to user
+            message = f"Failed to load project: {exc}"
+            self._append_log(f"[PROJECT] {message}\n")
+            self.show_toast(message, level="error")
+            return
+
+        self._on_project_loaded(project)
+
+    # ------------------------------------------------------------------
+    def save_config(self) -> None:
+        project = self._require_project()
+        project.update_from_config(self.job)
+        saved = self._project_manager.save_project()
+        self._write_runtime_config(saved)
+        self.show_toast("Project saved", level="success")
+        self._update_dirty_ui()
+
+    # ------------------------------------------------------------------
+    def _reload_from_mapping(self, mapping: dict) -> bool:
+        project = self._require_project()
+        try:
+            updated_config = load_config(mapping, base_path=project.paths.data_dir)
     def new_project_dialog(self) -> None:
         if not self._confirm_project_change():
             return
@@ -1477,12 +1588,55 @@ class PlotinatorApp(ttkb.Window):
             self._append_log(f"[CONFIG] {error_message}\n")
             self.show_toast(error_message, level="error")
             return False
-        project.update_from_config(new_config)
+        project.update_from_config(updated_config)
         self.job = project.config
         self.refresh_table()
         self._refresh_available_data_files()
-        self._update_window_title()
+        self._update_dirty_ui()
         return True
+
+    # ------------------------------------------------------------------
+    def _require_project(self) -> PlotinatorProject:
+        project = self._project
+        if project is None:
+            raise RuntimeError("No project loaded")
+        return project
+
+    # ------------------------------------------------------------------
+    def _on_project_loaded(self, project: PlotinatorProject) -> None:
+        self._project = project
+        self.job = project.config
+        self.folder = project.paths.root
+        self._project_location = project.paths.root
+        runtime_config = self._write_runtime_config(project)
+        self._set_status(f"Project loaded: {project.paths.root}")
+        self._append_log(f"[PROJECT] Loaded project from {project.paths.root}\n")
+        self.refresh_table()
+        self._refresh_available_data_files()
+        self._update_dirty_ui()
+        if runtime_config.exists():
+            self._append_log(f"[PROJECT] Runtime config: {runtime_config}\n")
+
+    # ------------------------------------------------------------------
+    def _write_runtime_config(self, project: PlotinatorProject) -> Path:
+        runtime_path = project.paths.root / "config.runtime.json"
+        runtime_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = project.to_config().to_dict()
+        with runtime_path.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+            handle.write("\n")
+        self.config_path = runtime_path
+        return runtime_path
+
+    # ------------------------------------------------------------------
+    def _update_dirty_ui(self) -> None:
+        project = self._project
+        if project is None:
+            self.title(self._base_window_title)
+            return
+        label = project.metadata.label or project.paths.root.name
+        dirty_marker = " *" if self._project_manager.dirty else ""
+        self.title(f"{label}{dirty_marker} – {self._base_window_title}")
 
     # ------------------------------------------------------------------
     def refresh_table(self) -> None:
@@ -1510,7 +1664,22 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def select_folder(self) -> None:
-        self.open_project_dialog()
+        folder = filedialog.askdirectory(title="Select data folder")
+        if not folder:
+            return
+
+        if self._worker and self._worker.is_running():
+            warning_message = "Stop the running batch before changing folders."
+            self.show_toast(warning_message, level="warning")
+            messagebox.showwarning("Plotinator", warning_message)
+            return
+
+        self._stop_runner_thread()
+        selected = Path(folder).resolve()
+        self.folder = selected
+        self._project_location = selected
+        self.show_toast(f"Project set to {self.folder}")
+        self.load_config()
 
     # ------------------------------------------------------------------
     def add_fit(self) -> None:
@@ -1951,7 +2120,7 @@ class PlotinatorApp(ttkb.Window):
             "datasets": [],
         }
         if isinstance(fit, FitConfig):
-            data = fit.to_dict(relative_to=self.job.base_path)
+            data = fit.to_dict(relative_to=self._require_project().paths.data_dir)
         else:
             data = copy.deepcopy(base)
         style_data = copy.deepcopy(data.get("style", {})) if isinstance(data.get("style"), dict) else {}
@@ -2161,6 +2330,7 @@ class PlotinatorApp(ttkb.Window):
                 editor,
                 data_dir=self._default_data_dir(),
                 data_files=self._available_data_files,
+                import_data_file=self._handle_import_data_file,
             )
             editor.wait_window(dialog)
             if dialog.result:
@@ -2178,9 +2348,10 @@ class PlotinatorApp(ttkb.Window):
                 return
             dialog = DatasetDialog(
                 editor,
-                current,
+                dataset=current,
                 data_dir=self._default_data_dir(),
                 data_files=self._available_data_files,
+                import_data_file=self._handle_import_data_file,
             )
             editor.wait_window(dialog)
             if dialog.result:
@@ -2319,6 +2490,7 @@ class DatasetDialog(ttkb.Toplevel):
         *,
         data_dir: Path | None = None,
         data_files: Sequence[Path] | None = None,
+        import_data_file: Callable[[Path], Path] | None = None,
     ) -> None:
         super().__init__(master)
         self.title("Dataset settings")
@@ -2334,13 +2506,14 @@ class DatasetDialog(ttkb.Toplevel):
                 self._data_dir = data_dir
         else:
             self._data_dir = None
+        self._import_data_file = import_data_file
         resolved_files: list[Path] = []
         for path in data_files or []:
             try:
                 resolved_files.append(path.resolve())
             except FileNotFoundError:
                 resolved_files.append(path)
-        self._available_files: tuple[Path, ...] = tuple(resolved_files)
+        self._available_files: list[Path] = sorted(resolved_files)
         self._file_selector: ttkb.Combobox | None = None
 
         data = copy.deepcopy(dataset) if dataset else {}
@@ -2376,8 +2549,11 @@ class DatasetDialog(ttkb.Toplevel):
                 dialog_options["initialdir"] = str(self._data_dir)
             chosen = filedialog.askopenfilename(**dialog_options)
             if chosen:
-                self.path_entry.delete(0, tk.END)
-                self.path_entry.insert(0, chosen)
+                selected = self._ensure_local_copy(Path(chosen))
+                if selected is None:
+                    return
+                self._set_path_entry(selected)
+                self._select_file_in_combobox(selected)
 
         ttkb.Button(self, text="Browse", command=browse, bootstyle="secondary-outline").grid(
             row=2, column=2, padx=10, pady=6
@@ -2480,6 +2656,67 @@ class DatasetDialog(ttkb.Toplevel):
         except FileNotFoundError:
             return candidate
 
+    def _refresh_file_selector(self) -> None:
+        if not self._file_selector:
+            return
+        values = [self._format_display_path(path) for path in self._available_files]
+        self._file_selector.configure(values=values)
+
+    def _add_available_file(self, path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except FileNotFoundError:
+            resolved = path
+        if resolved not in self._available_files:
+            self._available_files.append(resolved)
+            self._available_files.sort()
+            self._refresh_file_selector()
+
+    def _set_path_entry(self, path: Path) -> None:
+        display_value = self._format_display_path(path)
+        self.path_entry.delete(0, tk.END)
+        self.path_entry.insert(0, display_value)
+
+    def _select_file_in_combobox(self, path: Path) -> None:
+        selector = self._file_selector
+        if selector is None:
+            return
+        try:
+            resolved = path.resolve()
+        except FileNotFoundError:
+            resolved = path
+        for idx, candidate in enumerate(self._available_files):
+            if candidate == resolved:
+                selector.current(idx)
+                break
+
+    def _ensure_local_copy(self, path: Path) -> Path | None:
+        try:
+            resolved_path = path.resolve()
+        except FileNotFoundError:
+            resolved_path = path
+        if self._data_dir is None or self._import_data_file is None:
+            self._add_available_file(resolved_path)
+            return resolved_path
+        try:
+            data_root = self._data_dir.resolve()
+        except FileNotFoundError:
+            data_root = self._data_dir
+        try:
+            resolved_path.relative_to(data_root)
+            self._add_available_file(resolved_path)
+            return resolved_path
+        except ValueError:
+            pass
+        try:
+            imported_path = self._import_data_file(resolved_path)
+        except Exception as exc:  # noqa: BLE001 - surfaced via toast
+            self.show_toast(f"Failed to import data file: {exc}", level="error")
+            return None
+        self._add_available_file(imported_path)
+        self.show_toast(f"Imported {imported_path.name} into project", level="info")
+        return imported_path
+
     def _on_data_file_selected(self, _event: tk.Event | None = None) -> None:
         if not self._file_selector:
             return
@@ -2487,9 +2724,7 @@ class DatasetDialog(ttkb.Toplevel):
         if index < 0 or index >= len(self._available_files):
             return
         selected_path = self._available_files[index]
-        display_value = self._format_display_path(selected_path)
-        self.path_entry.delete(0, tk.END)
-        self.path_entry.insert(0, display_value)
+        self._set_path_entry(selected_path)
 
     def _on_save(self) -> None:
         def notify(
@@ -2535,6 +2770,11 @@ class DatasetDialog(ttkb.Toplevel):
             notify(f"Data file not found: {path_raw}", focus_widget=self.path_entry)
             return
 
+        local_path = self._ensure_local_copy(resolved_path)
+        if local_path is None:
+            return
+        resolved_path = local_path
+
         if self._data_dir is not None:
             try:
                 path_value = resolved_path.relative_to(self._data_dir).as_posix()
@@ -2545,6 +2785,7 @@ class DatasetDialog(ttkb.Toplevel):
 
         self.path_entry.delete(0, tk.END)
         self.path_entry.insert(0, path_value)
+        self._select_file_in_combobox(resolved_path)
 
         x_value_raw = (self.x_spin.get() or "").strip()
         y_value_raw = (self.y_spin.get() or "").strip()
