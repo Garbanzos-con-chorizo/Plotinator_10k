@@ -1,6 +1,6 @@
-# Plotinator Open Beta v1.0
+# Plotinator Open Beta v1.2.0
 
-Plotinator Open Beta v1.0 is a modular automation toolkit for producing high-quality fitting plots from
+Plotinator Open Beta v1.2.0 is a modular automation toolkit for producing high-quality fitting plots from
 large batches of experimental datasets. The stack now ships as a Python package with separate
 layers for configuration, execution, user interface, and reporting so each surface can evolve
 independently.
@@ -14,8 +14,54 @@ independently.
   reuse.
 - **Desktop GUI** – `plotinator_gui.py` provides a ttkbootstrap-powered editor that loads the schema
   models directly, helping non-technical users manage fits and launch batches without touching JSON.
+  v1.2.0 introduces a quick theme toggle, persistent batch-log filtering/export controls, and preview
+  history navigation so you can compare fits without re-running jobs.
 - **Reporting pipeline** – `generate_pdf.py` converts engine output into Markdown and PDF artefacts via
   Pandoc, producing narrative-ready reports after each batch run.
+
+## Understanding `.p10k` Projects
+
+The 1.2.0 release formalises Plotinator projects as self-contained folders ending with the `.p10k`
+extension. Each project wraps metadata, fit definitions, and copied datasets so the GUI, CLI, and
+reporting tools share a consistent workspace.
+
+```text
+MyExperiment.p10k/
+├── project.json      # Metadata: schema version, human-friendly label, description
+├── fits.json         # All fit definitions (formulae, dataset bindings, styling)
+├── settings.json     # Engine + export defaults consumed by CLI/GUI/report tools
+├── data/             # Normalised dataset copies used during batch execution
+├── plots/            # Reserved for generated plots and residual previews
+└── exports/          # Reserved for rendered reports and derived artefacts
+```
+
+| Folder/File       | Purpose                                                                 |
+| ----------------- | ----------------------------------------------------------------------- |
+| `project.json`    | Stores schema metadata plus optional labels/descriptions for the UI.    |
+| `fits.json`       | Captures every fit, dataset assignment, and styling directive.          |
+| `settings.json`   | Persists batch defaults such as worker counts and export toggles.       |
+| `data/`           | Houses dataset copies so projects remain portable across machines.      |
+| `plots/`          | Destination for on-demand previews captured by the GUI preview drawer.  |
+| `exports/`        | Destination for generated Markdown/PDF reports and CSV summaries.       |
+
+### Sample `settings.json`
+
+```json
+{
+  "schema_version": 2,
+  "batch": {
+    "max_workers": 4,
+    "overwrite_outputs": false
+  },
+  "exports": {
+    "generate_pdf": true,
+    "attach_preview_images": true
+  }
+}
+```
+
+The GUI reads and writes these JSON files directly, while the CLI resolves relative dataset paths
+against `<project>/data` to guarantee reproducible runs.
 
 ## Installation
 
@@ -62,12 +108,22 @@ plotinator-gui
 - Edit fits, datasets, styling, and preprocessing steps using a friendly interface.
 - Save changes back to disk through the schema layer.
 - Kick off batch runs directly from the GUI, watching live logs in the sidebar.
+- Use the toolbar theme toggle, log filter/export controls, and preview history buttons to surface
+  new diagnostics without leaving the main window.
 
 ### Migrating legacy workspaces
 
-- Opening a folder that only contains a historical `config.json` will automatically create a temporary `.p10k` project in your `%TEMP%/Untitled.p10k` directory.
-- The migration copies data files into the project `data/` folder and splits metadata/settings into the new JSON layout.
-- See [docs/LEGACY_WORKSPACES.md](docs/LEGACY_WORKSPACES.md) for a detailed overview of the schema differences.
+1. Launch the GUI and choose **Data Folder** (or run `plotinator-cli` pointing to an old
+   `config.json`).
+2. When a loose legacy file is detected, Plotinator will synthesise a `.p10k` project in your
+   temporary directory and display a toast describing the destination.
+3. Review the generated folder, then use **Save Config** to persist it in a permanent location. The
+   wizard copies datasets into `data/`, generates `project.json`, `fits.json`, and `settings.json`, and
+   rewires every dataset reference to the portable paths.
+4. Replace scripts or shortcuts that previously referenced `config.json` with the new project
+   directory. CLI runs now target `path/to/Project.p10k/settings.json` or the root project folder.
+5. Consult [docs/LEGACY_WORKSPACES.md](docs/LEGACY_WORKSPACES.md) for side-by-side schema comparisons
+   and manual migration tips (useful for air-gapped deployments).
 
 ### Generate a PDF report
 
@@ -168,5 +224,5 @@ Common packaging failures and how to recover are documented in the [Installer Gu
 
 ## License
 
-Plotinator Open Beta v1.0 is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for
+Plotinator Open Beta v1.2.0 is distributed under the terms of the MIT License. See [LICENSE](LICENSE) for
 additional details.

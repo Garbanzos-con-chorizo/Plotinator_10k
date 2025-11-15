@@ -8,8 +8,12 @@ import shutil
 import subprocess
 import tempfile
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from plotinator.project import ProjectPaths
 
 from config import ConfigError, JobSettings, load_config_file
 from reports.markdown_builder import write_markdown_report
@@ -131,7 +135,19 @@ def _normalize_path(path: str | None) -> str | None:
     return os.path.abspath(path).replace("\\", "/")
 
 
-def _prepare_preview_payload(result: dict[str, Any]) -> dict[str, Any]:
+def _allocate_preview_dir(base_dir: str | os.PathLike[str] | None) -> str:
+    if base_dir is None:
+        return tempfile.mkdtemp(prefix="plotinator_preview_")
+
+    directory = os.path.join(os.fspath(base_dir), f"preview_{uuid.uuid4().hex}")
+    os.makedirs(directory, exist_ok=True)
+    return directory
+
+
+def _prepare_preview_payload(
+    result: dict[str, Any],
+    preview_temp_root: str | os.PathLike[str] | None = None,
+) -> dict[str, Any]:
     output_plot = result.get("output_plot")
     residuals_plot = result.get("residuals_plot")
     preview_plot = output_plot
@@ -148,7 +164,7 @@ def _prepare_preview_payload(result: dict[str, Any]) -> dict[str, Any]:
         existing_files.append(("residuals", residuals_plot))
 
     if existing_files:
-        cleanup_dir = tempfile.mkdtemp(prefix="plotinator_preview_")
+        cleanup_dir = _allocate_preview_dir(preview_temp_root)
         try:
             for kind, source in existing_files:
                 base_name = os.path.basename(source) or (
@@ -223,6 +239,8 @@ def process_plot(
     plot_cfg: dict,
     base_output: str,
     dispatcher: _EventDispatcher | None = None,
+    *,
+    preview_base_dir: str | os.PathLike[str] | None = None,
 ) -> dict:
     """Handle a single plot end-to-end: create folder, run fit, residuals, and metrics."""
 
@@ -338,7 +356,7 @@ def process_plot(
     event_kwargs: dict[str, Any] = {"title": plot_cfg.get("title", "Untitled")}
     if dispatcher and dispatcher.has_callback():
         event_kwargs["result"] = copy.deepcopy(result)
-        event_kwargs["preview"] = _prepare_preview_payload(result)
+        event_kwargs["preview"] = _prepare_preview_payload(result, preview_base_dir)
 
     if dispatcher:
         dispatcher.emit("plot-complete", **event_kwargs)
@@ -355,6 +373,7 @@ def run_job(
     max_workers: int | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    project_paths: "ProjectPaths | None" = None,
 ) -> dict[str, Any]:
     """Execute a batch fit job from an in-memory config definition."""
 
@@ -365,12 +384,25 @@ def run_job(
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 
         job_settings = settings
-        if output_dir is not None:
-            base_output = os.fspath(output_dir)
-        elif job_settings and job_settings.output_dir is not None:
-            base_output = os.fspath(job_settings.output_dir)
+        preview_temp_root: str | None = None
+        exports_output_dir: str | None = None
+
+        if project_paths is not None:
+            plots_root = os.path.abspath(os.fspath(project_paths.plots_dir))
+            exports_root = os.path.abspath(os.fspath(project_paths.exports_dir))
+            os.makedirs(plots_root, exist_ok=True)
+            os.makedirs(exports_root, exist_ok=True)
+            base_output = os.path.join(plots_root, ts)
+            preview_temp_root = os.path.join(base_output, "__previews__")
+            exports_output_dir = os.path.join(exports_root, ts)
         else:
-            base_output = os.path.abspath(os.path.join("outputs", ts))
+            if output_dir is not None:
+                base_output = os.fspath(output_dir)
+            elif job_settings and job_settings.output_dir is not None:
+                base_output = os.fspath(job_settings.output_dir)
+            else:
+                base_output = os.path.abspath(os.path.join("outputs", ts))
+
         os.makedirs(base_output, exist_ok=True)
 
         worker_count: int
@@ -389,7 +421,15 @@ def run_job(
 
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             for plot_cfg in plots:
-                futures[executor.submit(process_plot, plot_cfg, base_output, dispatcher)] = plot_cfg
+                futures[
+                    executor.submit(
+                        process_plot,
+                        plot_cfg,
+                        base_output,
+                        dispatcher,
+                        preview_base_dir=preview_temp_root,
+                    )
+                ] = plot_cfg
 
             for future in as_completed(futures):
                 plot_cfg = futures[future]
@@ -417,8 +457,12 @@ def run_job(
         markdown_path: str | None = None
         pdf_path: str | None = None
 
+        markdown_output_dir = exports_output_dir or base_output
+
         try:
-            markdown_path = str(write_markdown_report(json_path))
+            markdown_path = str(
+                write_markdown_report(json_path, output_folder=markdown_output_dir)
+            )
             dispatcher.emit(
                 "report-markdown-ready",
                 markdown_path=markdown_path,
@@ -475,6 +519,7 @@ def run_batch(
     max_workers: int | None = None,
     output_dir: str | os.PathLike[str] | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    project_paths: "ProjectPaths | None" = None,
 ) -> dict[str, Any]:
     try:
         job = load_config_file(config_path)
@@ -494,4 +539,5 @@ def run_batch(
         max_workers=max_workers,
         output_dir=output_dir,
         on_event=on_event,
+        project_paths=project_paths,
     )
