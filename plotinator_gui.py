@@ -454,22 +454,6 @@ class PlotinatorApp(ttkb.Window):
             self.open_project_dialog()
 
     # ------------------------------------------------------------------
-    def _apply_project(self, project: PlotinatorProject, *, notify: bool = False) -> None:
-        self._project = project
-        self.job = project.config
-        self.job.base_path = project.paths.data_dir
-        self._engine_config_path = project.paths.root / CONFIG_PATH
-        self._materialise_engine_config(project)
-        self._current_output_dir = None
-        self._hide_preview_pane()
-        self.refresh_table()
-        self._refresh_available_data_files()
-        self._set_project_action_state(True)
-        self._update_window_title()
-        if notify:
-            self.show_toast(f"Project ready: {self._project_display_name(project)}", level="info")
-
-    # ------------------------------------------------------------------
     def _project_display_name(self, project: PlotinatorProject | None = None) -> str:
         target = project or self._project
         if target is None:
@@ -1535,14 +1519,19 @@ class PlotinatorApp(ttkb.Window):
         self.show_toast("Created a new project", level="info")
 
     # ------------------------------------------------------------------
-    def _apply_project(self, project: PlotinatorProject, *, record_state: bool) -> None:
+    def _apply_project(self, project: PlotinatorProject, *, record_state: bool = False) -> None:
         self._project = project
         self.config_path = project.paths.root / CONFIG_PATH
+        self._engine_config_path = project.paths.root / CONFIG_PATH
         self.job = project.to_config()
+        self.job.base_path = project.paths.data_dir
         self.folder = project.paths.data_dir
+        self._current_output_dir = None
+        self._hide_preview_pane()
         self.refresh_table()
         self._refresh_available_data_files()
-        self._update_window_title(project)
+        self._set_project_action_state(True)
+        self._update_window_title()
 
         if record_state:
             self._app_state.record_project(project.paths.root)
@@ -1550,11 +1539,6 @@ class PlotinatorApp(ttkb.Window):
             self._update_recent_projects_menu()
 
         self._dismiss_autosave_error_dialog()
-
-    # ------------------------------------------------------------------
-    def _update_window_title(self, project: PlotinatorProject) -> None:
-        label = project.metadata.label or project.paths.root.name
-        self.title(f"Plotinator Open Beta v{PACKAGE_VERSION} — {label}")
 
     # ------------------------------------------------------------------
     def _open_project_path(self, path: Path, *, record_state: bool = True) -> None:
