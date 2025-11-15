@@ -8,6 +8,7 @@ import pytest
 
 from config import JobSettings
 from engine import runner
+from plotinator.project import ProjectPaths
 
 
 def _install_pipeline_stubs(
@@ -51,12 +52,19 @@ def _install_pipeline_stubs(
     def fake_compute_metrics(*_: object) -> dict[str, float]:
         return {"r2": 0.99, "rmse": 0.5}
 
-    def fake_write_markdown(results_path: str) -> Path:
-        md_path = output_dir / "report.md"
+    def fake_write_markdown(
+        results_path: str,
+        *,
+        output_folder: str | Path | None = None,
+        filename: str = "report.md",
+    ) -> Path:
+        target_dir = Path(output_folder) if output_folder else output_dir
+        target_dir.mkdir(parents=True, exist_ok=True)
+        md_path = target_dir / filename
         md_path.write_text(f"results: {results_path}", encoding="utf-8")
         return md_path
 
-    def fake_export_pdf(markdown_path: str) -> Path:
+    def fake_export_pdf(markdown_path: str, *_, **__) -> Path:
         if export_pdf_exception is not None:
             raise export_pdf_exception
         pdf_path = Path(markdown_path).with_suffix(".pdf")
@@ -138,6 +146,53 @@ def test_run_job_produces_artifacts(
     if cleanup_dir:
         assert Path(cleanup_dir).exists()
 
+
+def test_run_job_with_project_paths(
+    minimal_config: dict,
+    sample_paths,
+    config_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Providing project paths should redirect outputs into project folders."""
+
+    events: list[dict] = []
+    project_root = tmp_path / "project"
+    project_paths = ProjectPaths.from_root(project_root)
+
+    _install_pipeline_stubs(monkeypatch, project_paths.plots_dir)
+
+    result = runner.run_job(
+        minimal_config,
+        config_path=str(config_path),
+        settings=JobSettings(max_workers=1),
+        on_event=events.append,
+        project_paths=project_paths,
+    )
+
+    output_dir = Path(result["output_dir"])
+    assert output_dir.is_dir()
+    assert output_dir.parent == project_paths.plots_dir.resolve()
+    assert Path(result["results_path"]).is_relative_to(output_dir)
+
+    assert result["markdown_path"] is not None
+    assert result["pdf_path"] is not None
+    markdown_path = Path(result["markdown_path"])
+    pdf_path = Path(result["pdf_path"])
+    expected_exports_dir = (project_paths.exports_dir / output_dir.name).resolve()
+    assert markdown_path.parent == expected_exports_dir
+    assert pdf_path.parent == expected_exports_dir
+    assert markdown_path.exists()
+    assert pdf_path.exists()
+
+    plot_events = [event for event in events if event.get("type") == "plot-complete"]
+    assert plot_events
+    for event in plot_events:
+        preview = event.get("preview") or {}
+        cleanup_dir = preview.get("cleanup_dir")
+        if cleanup_dir:
+            cleanup_path = Path(cleanup_dir)
+            assert cleanup_path.is_relative_to(output_dir)
 
 def test_run_job_handles_pdf_export_error(
     minimal_config: dict,
