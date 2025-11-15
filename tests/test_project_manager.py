@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from config.schema import PlotinatorConfig
-from plotinator.project import ProjectManager
+from plotinator.project import ProjectManager, ProjectValidationError
 
 
 def _write_legacy_config(root: Path) -> None:
@@ -117,4 +119,79 @@ def test_open_project_migrates_legacy_workspace(tmp_path: Path) -> None:
     assert project.metadata.label == "legacy"
     assert project.paths.metadata.is_file()
     assert manager.dirty is False
+
+
+def test_open_project_rejects_incomplete_structure(tmp_path: Path) -> None:
+    project_root = tmp_path / "broken.p10k"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    (project_root / "fits.json").write_text("[]", encoding="utf-8")
+    for folder in ("data", "plots", "exports"):
+        (project_root / folder).mkdir()
+
+    manager = ProjectManager()
+
+    with pytest.raises(ProjectValidationError) as excinfo:
+        manager.open_project(project_root)
+
+    issues = excinfo.value.result.issues
+    assert any(issue.subject == "settings" for issue in issues)
+
+
+def test_open_project_reports_invalid_json(tmp_path: Path) -> None:
+    project_root = tmp_path / "invalid-json.p10k"
+    project_root.mkdir()
+    (project_root / "project.json").write_text("{}", encoding="utf-8")
+    (project_root / "settings.json").write_text("{}", encoding="utf-8")
+    (project_root / "fits.json").write_text("{", encoding="utf-8")
+    for folder in ("data", "plots", "exports"):
+        (project_root / folder).mkdir()
+
+    manager = ProjectManager()
+
+    with pytest.raises(ProjectValidationError) as excinfo:
+        manager.open_project(project_root)
+
+    issue = excinfo.value.result.issues[0]
+    assert issue.code == "invalid-json"
+    assert issue.path == project_root / "fits.json"
+
+
+def test_save_project_rejects_missing_dataset(tmp_path: Path) -> None:
+    manager = ProjectManager()
+    project = manager.new_project(tmp_path / "dangling.p10k")
+
+    data_file = manager.data_path("input.csv")
+    data_file.write_text("x,y\n1,2\n", encoding="utf-8")
+
+    config_payload = {
+        "fits": [
+            {
+                "title": "Dangling",
+                "formula": "a*x",
+                "datasets": [
+                    {
+                        "label": "Primary",
+                        "data_source": {
+                            "path": "input.csv",
+                            "columns": {"x": 1, "y": 2},
+                        },
+                    }
+                ],
+            }
+        ],
+        "settings": {},
+    }
+
+    config = PlotinatorConfig.from_mapping(config_payload, base_path=project.paths.data_dir)
+    project.update_from_config(config)
+    manager.save_project()
+
+    data_file.unlink()
+
+    with pytest.raises(ProjectValidationError) as excinfo:
+        manager.save_project()
+
+    issues = excinfo.value.result.issues
+    assert issues[0].code == "dangling-dataset"
 
