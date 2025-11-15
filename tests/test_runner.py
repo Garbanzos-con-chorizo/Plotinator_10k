@@ -6,8 +6,9 @@ from typing import Optional
 
 import pytest
 
-from config import JobSettings
+from config import JobSettings, PlotinatorConfig
 from engine import runner
+from plotinator.project import ProjectManager
 
 
 def _install_pipeline_stubs(
@@ -15,6 +16,7 @@ def _install_pipeline_stubs(
     output_dir: Path,
     *,
     export_pdf_exception: Exception | None = None,
+    report_dir: Path | None = None,
 ) -> None:
     """Replace external tooling with deterministic fakes for the run pipeline."""
 
@@ -51,8 +53,11 @@ def _install_pipeline_stubs(
     def fake_compute_metrics(*_: object) -> dict[str, float]:
         return {"r2": 0.99, "rmse": 0.5}
 
+    report_root = report_dir or output_dir
+
     def fake_write_markdown(results_path: str) -> Path:
-        md_path = output_dir / "report.md"
+        report_root.mkdir(parents=True, exist_ok=True)
+        md_path = report_root / "report.md"
         md_path.write_text(f"results: {results_path}", encoding="utf-8")
         return md_path
 
@@ -240,3 +245,85 @@ def test_run_job_records_plot_failures(
     event_types = [event["type"] for event in events]
     assert "plot-error" in event_types
     assert "plot-complete" in event_types
+
+
+def test_run_job_with_project_directories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Project-aware jobs should separate plot previews and exported reports."""
+
+    manager = ProjectManager()
+    project_root = tmp_path / "demo.p10k"
+    project = manager.new_project(project_root)
+
+    data_file = project.paths.data_dir / "sample.dat"
+    data_file.write_text("0 0\n1 1\n2 4\n", encoding="utf-8")
+
+    config_payload = {
+        "settings": {"output_dir": "../exports", "max_workers": 1},
+        "fits": [
+            {
+                "title": "Parabola",
+                "formula": "a*x + b",
+                "residuals": True,
+                "layout": {
+                    "rows": 1,
+                    "columns": 1,
+                    "shared_x": False,
+                    "shared_y": False,
+                    "show_legend": True,
+                },
+                "datasets": [
+                    {
+                        "label": "Main",
+                        "data_source": {
+                            "path": "sample.dat",
+                            "columns": {"x": 1, "y": 2},
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+    config = PlotinatorConfig.from_mapping(config_payload, base_path=project.paths.data_dir)
+    project.update_from_config(config)
+    manager.save_project()
+
+    events: list[dict] = []
+    _install_pipeline_stubs(
+        monkeypatch,
+        project.paths.plots_dir,
+        report_dir=project.paths.exports_dir,
+    )
+
+    job_config = project.to_config().to_dict()
+    project_config_path = project.paths.data_dir / "job.json"
+    project_config_path.write_text("{}", encoding="utf-8")
+    result = runner.run_job(
+        job_config,
+        config_path=str(project_config_path),
+        settings=project.config.settings,
+        output_dir=project.paths.plots_dir,
+        on_event=events.append,
+    )
+
+    output_dir = Path(result["output_dir"])
+    assert output_dir == project.paths.plots_dir
+    assert Path(result["results_path"]).parent == project.paths.plots_dir
+    assert Path(result["markdown_path"]).parent == project.paths.exports_dir
+    assert Path(result["pdf_path"]).parent == project.paths.exports_dir
+
+    first_result = result["results"][0]
+    plot_path = Path(first_result["output_plot"])
+    assert project.paths.plots_dir in plot_path.parents or plot_path.parent == project.paths.plots_dir
+    residual_path = first_result["residuals_plot"]
+    if residual_path:
+        residual_path_obj = Path(residual_path)
+        assert (
+            project.paths.plots_dir in residual_path_obj.parents
+            or residual_path_obj.parent == project.paths.plots_dir
+        )
+
+    assert any(event["type"] == "report-exported" for event in events)
