@@ -63,6 +63,12 @@ plotinator-gui
 - Save changes back to disk through the schema layer.
 - Kick off batch runs directly from the GUI, watching live logs in the sidebar.
 
+### Migrating legacy workspaces
+
+- Opening a folder that only contains a historical `config.json` will automatically create a temporary `.p10k` project in your `%TEMP%/Untitled.p10k` directory.
+- The migration copies data files into the project `data/` folder and splits metadata/settings into the new JSON layout.
+- See [docs/LEGACY_WORKSPACES.md](docs/LEGACY_WORKSPACES.md) for a detailed overview of the schema differences.
+
 ### Generate a PDF report
 
 ```bash
