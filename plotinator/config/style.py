@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Mapping, TypeAlias
+
+
+TickEntry: TypeAlias = float | str | tuple[str, float]
+TicksSpec: TypeAlias = tuple[TickEntry, ...] | float | str | None
 
 
 def _coerce_bool(value) -> bool:
@@ -49,11 +54,15 @@ class StyleConfig:
     x_unit: str = ""
     x_scale: str = "linear"
     x_tick_format: str = ""
+    x_window: tuple[float | None, float | None] | None = None
+    x_ticks: TicksSpec = None
 
     y_label: str = "Y"
     y_unit: str = ""
     y_scale: str = "linear"
     y_tick_format: str = ""
+    y_window: tuple[float | None, float | None] | None = None
+    y_ticks: TicksSpec = None
 
     grid: bool = True
     grid_layer: str = "back"
@@ -84,6 +93,10 @@ class StyleConfig:
         self.point_type = _coerce_int(self.point_type, 7)
         self.grid = _coerce_bool(self.grid)
         self.legend_visible = _coerce_bool(self.legend_visible)
+        self.x_window = self._normalize_window(self.x_window)
+        self.y_window = self._normalize_window(self.y_window)
+        self.x_ticks = self._normalize_ticks(self.x_ticks)
+        self.y_ticks = self._normalize_ticks(self.y_ticks)
 
     # ------------------------------------------------------------------
     @classmethod
@@ -109,10 +122,14 @@ class StyleConfig:
             "x_unit": self.x_unit,
             "x_scale": self.x_scale,
             "x_tick_format": self.x_tick_format,
+            "x_window": self._window_to_serializable(self.x_window),
+            "x_ticks": self._ticks_to_serializable(self.x_ticks),
             "y_label": self.y_label,
             "y_unit": self.y_unit,
             "y_scale": self.y_scale,
             "y_tick_format": self.y_tick_format,
+            "y_window": self._window_to_serializable(self.y_window),
+            "y_ticks": self._ticks_to_serializable(self.y_ticks),
             "grid": self.grid,
             "grid_layer": self.grid_layer,
             "legend_visible": self.legend_visible,
@@ -165,4 +182,167 @@ class StyleConfig:
         if mapped == "default":
             return "set key"
         return f"set key {mapped}"
+
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_window(
+        value: tuple[float | None, float | None] | Sequence[float | None] | Mapping[str, float | None] | str | float | None,
+    ) -> tuple[float | None, float | None] | None:
+        if value in (None, ""):
+            return None
+
+        lo: float | None = None
+        hi: float | None = None
+
+        if isinstance(value, tuple) and len(value) == 2:
+            lo, hi = value
+        elif isinstance(value, Mapping):
+            lo = StyleConfig._coerce_optional_float(value.get("min"))
+            hi = StyleConfig._coerce_optional_float(value.get("max"))
+        elif isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            seq = list(value)
+            if len(seq) >= 1:
+                lo = StyleConfig._coerce_optional_float(seq[0])
+            if len(seq) >= 2:
+                hi = StyleConfig._coerce_optional_float(seq[1])
+        elif isinstance(value, str):
+            parts = [part.strip() for part in value.replace("[", "").replace("]", "").split(",")]
+            if len(parts) >= 1:
+                lo = StyleConfig._coerce_optional_float(parts[0])
+            if len(parts) >= 2:
+                hi = StyleConfig._coerce_optional_float(parts[1])
+        else:
+            try:
+                num = float(value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                return None
+            else:
+                lo = num
+        if lo is None and hi is None:
+            return None
+        return (lo, hi)
+
+    @staticmethod
+    def _coerce_optional_float(value: float | str | None) -> float | None:
+        if value in (None, "", "*"):
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _escape_tick_label(label: str) -> str:
+        return label.replace("\\", "\\\\").replace('"', '\"')
+
+    @staticmethod
+    def _normalize_ticks(value: TicksSpec | Sequence | None) -> TicksSpec:  # type: ignore[type-var]
+        if value in (None, ""):
+            return None
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, str):
+            text = value.strip()
+            if not text or text.lower() in {"auto", "autofreq"}:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                parts = [part.strip() for part in text.split(",") if part.strip()]
+                if len(parts) > 1:
+                    entries: list[TickEntry] = []
+                    for part in parts:
+                        try:
+                            entries.append(float(part))
+                        except ValueError:
+                            entries.append(part)
+                    return tuple(entries)
+                return text
+
+        if isinstance(value, Sequence):
+            entries: list[TickEntry] = []
+            for item in value:
+                if isinstance(item, Sequence) and not isinstance(item, (str, bytes)):
+                    sub = list(item)
+                    if not sub:
+                        continue
+                    label = str(sub[0])
+                    position = StyleConfig._coerce_optional_float(sub[1] if len(sub) > 1 else None)
+                    if position is None:
+                        try:
+                            position_val = float(sub[0])
+                        except (TypeError, ValueError):
+                            entries.append(label)
+                        else:
+                            entries.append(position_val)
+                    else:
+                        entries.append((label, position))
+                else:
+                    try:
+                        entries.append(float(item))  # type: ignore[arg-type]
+                    except (TypeError, ValueError):
+                        entries.append(str(item))
+            return tuple(entries)
+
+        return None
+
+    @staticmethod
+    def _window_to_serializable(window: tuple[float | None, float | None] | None) -> list[float | None] | None:
+        if window is None:
+            return None
+        return [window[0], window[1]]
+
+    @staticmethod
+    def _ticks_to_serializable(ticks: TicksSpec) -> list | float | str | None:
+        if ticks is None:
+            return None
+        if isinstance(ticks, (int, float, str)):
+            return ticks
+        serialized: list = []
+        for entry in ticks:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                serialized.append([entry[0], entry[1]])
+            else:
+                serialized.append(entry)
+        return serialized
+
+    def axis_window(self, axis: str) -> tuple[float | None, float | None] | None:
+        return self.x_window if axis == "x" else self.y_window
+
+    def axis_range_clause(self, axis: str) -> str | None:
+        window = self.axis_window(axis)
+        if window is None:
+            return None
+        lo, hi = window
+        lo_text = "*" if lo is None else f"{lo:g}"
+        hi_text = "*" if hi is None else f"{hi:g}"
+        return f"set {axis}range [{lo_text}:{hi_text}]"
+
+    def axis_ticks_clause(self, axis: str) -> str:
+        ticks = self.x_ticks if axis == "x" else self.y_ticks
+        prefix = "set xtics" if axis == "x" else "set ytics"
+        if ticks is None:
+            return f"{prefix} autofreq"
+        if isinstance(ticks, (int, float)):
+            if float(ticks) == 0:
+                return f"{prefix} autofreq"
+            return f"{prefix} {float(ticks)}"
+        if isinstance(ticks, str):
+            return f"{prefix} {ticks}"
+        parts: list[str] = []
+        for entry in ticks:
+            if isinstance(entry, tuple) and len(entry) == 2:
+                label, position = entry
+                escaped_label = self._escape_tick_label(str(label))
+                if isinstance(position, (int, float)):
+                    parts.append(f'"{escaped_label}" {position}')
+                else:
+                    parts.append(f'"{escaped_label}" {position}')
+            elif isinstance(entry, (int, float)):
+                parts.append(f"{entry}")
+            else:
+                parts.append(str(entry))
+        return f"{prefix} ({', '.join(parts)})"
 
