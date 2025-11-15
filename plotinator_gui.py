@@ -5,13 +5,14 @@ import json
 import math
 import queue
 import shutil
+import sys
 import threading
 import tkinter as tk
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import ttkbootstrap as ttkb
 
@@ -168,6 +169,7 @@ class PlotinatorApp(ttkb.Window):
         self._current_preview_title: str | None = None
         self._latest_preview_title: str | None = None
         self._available_data_files: list[Path] = []
+        self._configure_styles()
         self._load_images()
 
         self._create_widgets()
@@ -175,6 +177,16 @@ class PlotinatorApp(ttkb.Window):
         self.tree.bind("<Double-1>", self.on_double_click)
         self.load_config()
         self._update_checker.start(self, self._handle_update_result)
+
+    # ------------------------------------------------------------------
+    def _configure_styles(self) -> None:
+        """Establish custom style rules for shared widgets."""
+
+        self._style.configure(
+            "Toolbar.TButton",
+            font=("Segoe UI", 11, "bold"),
+            padding=(14, 10),
+        )
 
     # ------------------------------------------------------------------
     def _create_widgets(self) -> None:
@@ -191,22 +203,25 @@ class PlotinatorApp(ttkb.Window):
 
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
-        toolbar_logo = self._images.get("toolbar_button")
-        button_plan = [
-            ("Data Folder", lambda: self.select_folder(), "info-outline", True),
-            ("Add Fit", lambda: self.add_fit(), "success-outline", False),
-            ("Delete Fit", lambda: self.delete_fit(), "danger-outline", True),
-            ("Save Config", lambda: self.save_config(), "secondary-outline", False),
-            ("Run Batch", lambda: self.run_batch(), "success", True),
-            ("Stop Batch", lambda: self.stop_batch(), "danger", True),
-            ("Open Report", lambda: self.open_latest_report(), "primary-outline", False),
-            ("Settings", lambda: self.open_settings_dialog(), "secondary", False),
+        button_plan: Sequence[tuple[str, Callable[[], None], str]] = [
+            ("Data Folder", self.select_folder, "secondary-outline"),
+            ("Add Fit", self.add_fit, "primary"),
+            ("Delete Fit", self.delete_fit, "danger-outline"),
+            ("Save Config", self.save_config, "secondary"),
+            ("Run Batch", self.run_batch, "success"),
+            ("Stop Batch", self.stop_batch, "danger"),
+            ("Open Report", self.open_latest_report, "info"),
+            ("Settings", self.open_settings_dialog, "secondary-outline"),
         ]
-        for text, cmd, style, use_logo in button_plan:
-            kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
-            if use_logo and toolbar_logo is not None:
-                kwargs.update({"image": toolbar_logo, "compound": "left", "padding": (6, 4)})
-            ttkb.Button(toolbar, **kwargs).pack(side="left", padx=4)
+        for text, cmd, style in button_plan:
+            ttkb.Button(
+                toolbar,
+                text=text,
+                command=cmd,
+                bootstyle=style,
+                style="Toolbar.TButton",
+                width=14,
+            ).pack(side="left", padx=4)
 
         content_paned = ttkb.Panedwindow(self, orient="horizontal")
         content_paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -1122,6 +1137,14 @@ class PlotinatorApp(ttkb.Window):
             self.iconphoto(True, icon)
             self._images["icon_header"] = self._scale_image(icon, 64)
             self._images["icon_toast"] = self._scale_image(icon, 32)
+
+        if sys.platform.startswith("win"):
+            ico_path = base_path / "packaging" / "windows" / "plotinator.ico"
+            if ico_path.exists():
+                try:
+                    self.iconbitmap(str(ico_path))
+                except tk.TclError:
+                    pass
 
         toolbar_icon = self._images.get("toolbar")
         if toolbar_icon is not None:
