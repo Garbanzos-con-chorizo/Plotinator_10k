@@ -7,6 +7,8 @@ import queue
 import shutil
 import threading
 import tkinter as tk
+import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Any, Sequence
@@ -15,6 +17,8 @@ import ttkbootstrap as ttkb
 
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 from engine import run_batch as engine_run_batch
+from plotinator import __version__ as PACKAGE_VERSION
+from plotinator.update_checker import ReleaseInfo, UpdateChecker, UpdateResult
 
 CONFIG_PATH = "config.json"
 
@@ -118,7 +122,7 @@ class PlotinatorApp(ttkb.Window):
 
     def __init__(self) -> None:
         super().__init__(themename="superhero")
-        self.title("Plotinator Open Beta v1.0")
+        self.title(f"Plotinator Open Beta v{PACKAGE_VERSION}")
         self.geometry("1200x800")
         self.resizable(True, True)
 
@@ -132,6 +136,13 @@ class PlotinatorApp(ttkb.Window):
         self._progress_total = 0
         self._progress_completed = 0
         self.status_var = tk.StringVar(self, value="Idle")
+        self._update_checker = UpdateChecker(
+            owner="plotinator-labs",
+            repo="Plotinator_10k",
+            current_version=PACKAGE_VERSION,
+        )
+        self._update_status_var = tk.StringVar(self, value=self._format_update_status())
+        self._settings_window: ttkb.Toplevel | None = None
         self._images: dict[str, tk.PhotoImage] = {}
         self._content_paned: ttkb.Panedwindow | None = None
         self._preview_container: ttkb.Frame | None = None
@@ -163,6 +174,7 @@ class PlotinatorApp(ttkb.Window):
         self._hide_preview_pane()
         self.tree.bind("<Double-1>", self.on_double_click)
         self.load_config()
+        self._update_checker.start(self, self._handle_update_result)
 
     # ------------------------------------------------------------------
     def _create_widgets(self) -> None:
@@ -172,7 +184,7 @@ class PlotinatorApp(ttkb.Window):
             ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
         ttkb.Label(
             header,
-            text="⚙️ Plotinator Open Beta v1.0",
+            text=f"⚙️ Plotinator Open Beta v{PACKAGE_VERSION}",
             font=("Segoe UI", 22, "bold"),
         ).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
@@ -188,6 +200,7 @@ class PlotinatorApp(ttkb.Window):
             ("Run Batch", lambda: self.run_batch(), "success", True),
             ("Stop Batch", lambda: self.stop_batch(), "danger", True),
             ("Open Report", lambda: self.open_latest_report(), "primary-outline", False),
+            ("Settings", lambda: self.open_settings_dialog(), "secondary", False),
         ]
         for text, cmd, style, use_logo in button_plan:
             kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
@@ -251,6 +264,148 @@ class PlotinatorApp(ttkb.Window):
             bootstyle="info-striped",
         )
         self.progress.pack(fill="x")
+
+    # ------------------------------------------------------------------
+    def _format_timestamp(self, value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    def _format_update_status(self) -> str:
+        prefs = self._update_checker.preferences
+        if not prefs.enabled:
+            return "Automatic update checks are disabled."
+
+        result = self._update_checker.last_result
+        if result is None:
+            if prefs.last_checked is None:
+                return "Automatic update checks enabled. Next check will run shortly."
+            return f"Last checked on {self._format_timestamp(prefs.last_checked)}."
+
+        if result.error:
+            return f"Last check failed at {self._format_timestamp(result.checked_at)}: {result.error}"
+
+        if result.release is not None:
+            return (
+                f"Update available ({result.release.version_label}, checked"
+                f" {self._format_timestamp(result.checked_at)})."
+            )
+
+        return f"No updates found (checked {self._format_timestamp(result.checked_at)})."
+
+    def open_settings_dialog(self) -> None:
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            self._settings_window.focus_force()
+            return
+
+        self._update_status_var.set(self._format_update_status())
+
+        window = ttkb.Toplevel(self)
+        window.title("Application settings")
+        window.geometry("360x260")
+        window.resizable(False, False)
+        window.transient(self)
+        window.grab_set()
+        self._settings_window = window
+
+        enabled_var = tk.BooleanVar(value=self._update_checker.preferences.enabled)
+        interval_var = tk.IntVar(value=self._update_checker.preferences.interval_hours)
+
+        ttkb.Label(window, text="Updates", font=("Segoe UI", 12, "bold")).pack(
+            anchor="w", padx=12, pady=(12, 4)
+        )
+        ttkb.Checkbutton(
+            window,
+            text="Check for new releases automatically",
+            variable=enabled_var,
+        ).pack(anchor="w", padx=18, pady=4)
+
+        freq_frame = ttkb.Frame(window)
+        freq_frame.pack(fill="x", padx=18, pady=(0, 12))
+        ttkb.Label(freq_frame, text="Check frequency (hours)").pack(side="left")
+        freq_spin = ttkb.Spinbox(
+            freq_frame,
+            from_=1,
+            to=168,
+            width=6,
+            textvariable=interval_var,
+        )
+        freq_spin.pack(side="left", padx=(10, 0))
+
+        status_label = ttkb.Label(
+            window,
+            textvariable=self._update_status_var,
+            wraplength=320,
+            bootstyle="info",
+            justify="left",
+        )
+        status_label.pack(fill="x", padx=12, pady=(0, 12))
+
+        buttons = ttkb.Frame(window)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+
+        def _close() -> None:
+            if self._settings_window is window:
+                self._settings_window = None
+            window.destroy()
+
+        def _apply() -> None:
+            try:
+                interval_value = int(interval_var.get())
+            except (tk.TclError, ValueError):
+                interval_value = self._update_checker.preferences.interval_hours
+            self._update_checker.update_preferences(
+                enabled=bool(enabled_var.get()),
+                interval_hours=interval_value,
+            )
+            self._update_status_var.set(self._format_update_status())
+            self.show_toast("Settings updated", level="success")
+            _close()
+
+        def _check_now() -> None:
+            self._update_status_var.set("Checking for updates…")
+            self._update_checker.check_now(self, self._handle_update_result)
+
+        ttkb.Button(buttons, text="Check now", command=_check_now, bootstyle="info-outline").pack(
+            side="left"
+        )
+        ttkb.Button(buttons, text="Save", command=_apply, bootstyle="success").pack(
+            side="right"
+        )
+        ttkb.Button(buttons, text="Close", command=_close).pack(side="right", padx=(0, 8))
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+
+    def _handle_update_result(self, result: UpdateResult) -> None:
+        self._update_status_var.set(self._format_update_status())
+        if result.error:
+            # Only surface failures when the user explicitly asked for a check.
+            if self._settings_window is not None and self._settings_window.winfo_exists():
+                self.show_toast(f"Update check failed: {result.error}", level="warning")
+            return
+
+        if result.release is not None:
+            self._announce_release(result.release)
+
+    def _announce_release(self, release: ReleaseInfo) -> None:
+        message = f"Update available: Plotinator {release.version_label}"
+        self.status_var.set(message)
+        self.show_toast(message, level="info")
+        summary = release.notes.splitlines()
+        excerpt = "\n".join(summary[:3]).strip()
+        if excerpt:
+            body = f"Plotinator {release.version_label} is available.\n\n{excerpt}\n\nOpen download page?"
+        else:
+            body = f"Plotinator {release.version_label} is available.\n\nOpen download page?"
+        if messagebox.askyesno("Update available", body, parent=self):
+            self._open_release_url(release.url)
+
+    def _open_release_url(self, url: str) -> None:
+        try:
+            webbrowser.open(url, new=2, autoraise=True)
+        except webbrowser.Error:
+            self.show_toast("Unable to open browser", level="error")
 
     # ------------------------------------------------------------------
     def _build_preview_container(self, parent: ttkb.Panedwindow) -> ttkb.Frame:
