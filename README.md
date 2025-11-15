@@ -93,11 +93,16 @@ pip install .[dev]    # install pytest + ruff for local development
 
 ```bash
 plotinator-cli path/to/config.json
+plotinator-cli path/to/project.p10k
+plotinator-cli path/to/project.p10k --output-dir /custom/exports
 ```
 
-- Reads the configuration file using the schema models.
+- Accepts either a legacy `config.json` file or a modern `.p10k` project directory.
 - Normalises dataset layouts and style configuration.
-- Executes gnuplot fits (with optional parallel workers) and writes results to `outputs/<timestamp>/`.
+- Exports to the project's configured output directory unless `--output-dir` is provided, otherwise
+  falls back to `outputs/<timestamp>/`.
+- Executes gnuplot fits (with optional parallel workers) and writes results to the selected output
+  directory.
 
 ### Launch the desktop GUI
 
