@@ -29,14 +29,27 @@ def _install_pipeline_stubs(
     def fake_run_gnuplot_script(_: str, workdir: str) -> str:
         work_path = Path(workdir)
         work_path.mkdir(parents=True, exist_ok=True)
-        (work_path / "log.txt").write_text("gnuplot log", encoding="utf-8")
-        return "FIT: a = 1\nFIT: b = 2\n"
+        (work_path / "plot.png").write_bytes(b"PNG")
+        (work_path / "residuals.png").write_bytes(b"PNG")
+        log_text = (
+            "final sum of squares of residuals : 4.2\n"
+            "variance of residuals (reduced chisquare) = WSSR/ndf   : 2.1\n"
+            "rms of residuals      (FIT_STDFIT) = sqrt(WSSR/ndf)    : 1.45\n"
+            "degrees of freedom    (FIT_NDF)                        : 2\n"
+            "PYFIT a 1 0.1\n"
+            "PYFIT b 2 0.2\n"
+        )
+        (work_path / "log.txt").write_text(log_text, encoding="utf-8")
+        return log_text
 
-    def fake_parse_fit_output(_: str) -> dict[str, float]:
-        return {"a": 1.0, "b": 2.0}
+    def fake_parse_fit_output(_: str) -> dict[str, dict[str, float]]:
+        return {
+            "a": {"value": 1.0, "error": 0.1},
+            "b": {"value": 2.0, "error": 0.2},
+        }
 
     def fake_compute_metrics(*_: object) -> dict[str, float]:
-        return {"r2": 0.99}
+        return {"r2": 0.99, "rmse": 0.5}
 
     def fake_write_markdown(results_path: str) -> Path:
         md_path = output_dir / "report.md"
@@ -85,12 +98,21 @@ def test_run_job_produces_artifacts(
     with open(result["results_path"], "r", encoding="utf-8") as handle:
         payload = json.load(handle)
     assert payload["results"]
-    assert payload["results"][0]["parameters"] == {"a": 1.0, "b": 2.0}
+    params = payload["results"][0]["parameters"]
+    assert params["a"]["value"] == pytest.approx(1.0)
+    assert params["a"]["error"] == pytest.approx(0.1)
+    assert params["b"]["value"] == pytest.approx(2.0)
+    assert params["b"]["error"] == pytest.approx(0.2)
     assert payload["errors"] == []
 
     first_result = result["results"][0]
     assert Path(first_result["datafile"]) == (sample_paths.config_dir / "sample.dat")
-    assert first_result["metrics"] == {"r2": 0.99}
+    metrics = first_result["metrics"]
+    assert metrics["r2"] == pytest.approx(0.99)
+    assert metrics["rmse"] == pytest.approx(0.5)
+    assert metrics["rms"] == pytest.approx(1.45)
+    assert metrics["chi_squared"] == pytest.approx(4.2)
+    assert metrics["reduced_chi_squared"] == pytest.approx(2.1)
 
     markdown_path = Path(result["markdown_path"])
     assert markdown_path.exists()
@@ -100,6 +122,21 @@ def test_run_job_produces_artifacts(
     event_types = {event["type"] for event in events}
     assert {"job-start", "plot-start", "report-exported", "job-complete"}.issubset(event_types)
     assert any(event["type"] == "plot-complete" for event in events)
+
+    plot_complete_events = [event for event in events if event["type"] == "plot-complete"]
+    assert plot_complete_events
+    preview = plot_complete_events[0].get("preview") or {}
+    plot_path = preview.get("output_plot")
+    if plot_path:
+        assert Path(plot_path).exists()
+    residual_path = preview.get("residuals_plot")
+    if residual_path:
+        assert Path(residual_path).exists()
+    assert preview.get("metrics", {}).get("chi_squared") == pytest.approx(4.2)
+    assert preview.get("parameters", {}).get("a", {}).get("error") == pytest.approx(0.1)
+    cleanup_dir = preview.get("cleanup_dir")
+    if cleanup_dir:
+        assert Path(cleanup_dir).exists()
 
 
 def test_run_job_handles_pdf_export_error(
