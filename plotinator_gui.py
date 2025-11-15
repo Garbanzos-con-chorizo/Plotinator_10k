@@ -684,9 +684,11 @@ class PlotinatorApp(ttkb.Window):
             data = fit.to_dict(relative_to=self.job.base_path)
         else:
             data = copy.deepcopy(base)
+        style_data = copy.deepcopy(data.get("style", {})) if isinstance(data.get("style"), dict) else {}
+
         editor = ttkb.Toplevel(self)
         editor.title("Fit details")
-        editor.geometry("620x520")
+        editor.geometry("700x560")
         editor.grab_set()
 
         notebook = ttkb.Notebook(editor)
@@ -694,9 +696,11 @@ class PlotinatorApp(ttkb.Window):
 
         general_tab = ttkb.Frame(notebook, padding=10)
         layout_tab = ttkb.Frame(notebook, padding=10)
+        style_tab = ttkb.Frame(notebook, padding=10)
         datasets_tab = ttkb.Frame(notebook, padding=10)
         notebook.add(general_tab, text="General")
         notebook.add(layout_tab, text="Layout")
+        notebook.add(style_tab, text="Style")
         notebook.add(datasets_tab, text="Datasets")
 
         # General tab --------------------------------------------------
@@ -744,6 +748,96 @@ class PlotinatorApp(ttkb.Window):
         ttkb.Checkbutton(layout_tab, text="Show legend", variable=show_legend).grid(
             row=4, column=0, columnspan=2, sticky="w", padx=5, pady=6
         )
+
+        # Style tab ----------------------------------------------------
+        style_tab.columnconfigure(1, weight=1)
+        style_tab.columnconfigure(3, weight=1)
+
+        def _extract_window_entries(value: object) -> tuple[str, str]:
+            lo_text = ""
+            hi_text = ""
+            if isinstance(value, (list, tuple)):
+                if len(value) > 0 and value[0] not in (None, ""):
+                    lo_text = str(value[0])
+                if len(value) > 1 and value[1] not in (None, ""):
+                    hi_text = str(value[1])
+            elif isinstance(value, dict):
+                if value.get("min") not in (None, ""):
+                    lo_text = str(value.get("min"))
+                if value.get("max") not in (None, ""):
+                    hi_text = str(value.get("max"))
+            elif isinstance(value, str):
+                stripped = value.strip().strip("[]")
+                parts = [part.strip() for part in stripped.split(",") if part.strip()]
+                if parts:
+                    lo_text = parts[0]
+                if len(parts) > 1:
+                    hi_text = parts[1]
+            elif value not in (None, ""):
+                try:
+                    lo_text = str(float(value))
+                except (TypeError, ValueError):
+                    lo_text = str(value)
+            return lo_text, hi_text
+
+        def _format_ticks_value(value: object) -> str:
+            if value in (None, ""):
+                return ""
+            if isinstance(value, (list, tuple, dict)):
+                try:
+                    return json.dumps(value)
+                except TypeError:
+                    return str(value)
+            return str(value)
+
+        style_entries: dict[str, ttkb.Entry] = {}
+
+        ttkb.Label(style_tab, text="X axis window").grid(row=0, column=0, sticky="w", padx=5, pady=6)
+        x_min_entry = ttkb.Entry(style_tab, width=12)
+        x_min_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=6)
+        ttkb.Label(style_tab, text="to").grid(row=0, column=2, sticky="w", padx=5, pady=6)
+        x_max_entry = ttkb.Entry(style_tab, width=12)
+        x_max_entry.grid(row=0, column=3, sticky="ew", padx=5, pady=6)
+        x_lo, x_hi = _extract_window_entries(style_data.get("x_window"))
+        if x_lo:
+            x_min_entry.insert(0, x_lo)
+        if x_hi:
+            x_max_entry.insert(0, x_hi)
+        style_entries["x_window_min"] = x_min_entry
+        style_entries["x_window_max"] = x_max_entry
+
+        ttkb.Label(style_tab, text="Y axis window").grid(row=1, column=0, sticky="w", padx=5, pady=6)
+        y_min_entry = ttkb.Entry(style_tab, width=12)
+        y_min_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=6)
+        ttkb.Label(style_tab, text="to").grid(row=1, column=2, sticky="w", padx=5, pady=6)
+        y_max_entry = ttkb.Entry(style_tab, width=12)
+        y_max_entry.grid(row=1, column=3, sticky="ew", padx=5, pady=6)
+        y_lo, y_hi = _extract_window_entries(style_data.get("y_window"))
+        if y_lo:
+            y_min_entry.insert(0, y_lo)
+        if y_hi:
+            y_max_entry.insert(0, y_hi)
+        style_entries["y_window_min"] = y_min_entry
+        style_entries["y_window_max"] = y_max_entry
+
+        ttkb.Label(style_tab, text="X axis ticks").grid(row=2, column=0, sticky="w", padx=5, pady=6)
+        x_ticks_entry = ttkb.Entry(style_tab)
+        x_ticks_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=6)
+        x_ticks_entry.insert(0, _format_ticks_value(style_data.get("x_ticks")))
+        style_entries["x_ticks"] = x_ticks_entry
+
+        ttkb.Label(style_tab, text="Y axis ticks").grid(row=3, column=0, sticky="w", padx=5, pady=6)
+        y_ticks_entry = ttkb.Entry(style_tab)
+        y_ticks_entry.grid(row=3, column=1, columnspan=3, sticky="ew", padx=5, pady=6)
+        y_ticks_entry.insert(0, _format_ticks_value(style_data.get("y_ticks")))
+        style_entries["y_ticks"] = y_ticks_entry
+
+        ttkb.Label(
+            style_tab,
+            text="Leave fields blank for automatic ranges/ticks. Use '*' for defaults or JSON lists for custom ticks.",
+            wraplength=480,
+            bootstyle="info",
+        ).grid(row=4, column=0, columnspan=4, sticky="w", padx=5, pady=(6, 0))
 
         # Datasets tab -------------------------------------------------
         dataset_frame = ttkb.Frame(datasets_tab)
@@ -873,7 +967,52 @@ class PlotinatorApp(ttkb.Window):
             payload["datasets"] = copy.deepcopy(dataset_list)
             if data.get("parameters"):
                 payload["parameters"] = copy.deepcopy(data.get("parameters"))
-            style_overrides = copy.deepcopy(data.get("style", {}))
+            style_overrides = copy.deepcopy(style_data)
+
+            def _parse_window(min_key: str, max_key: str, dest_key: str) -> None:
+                min_text = style_entries[min_key].get().strip()
+                max_text = style_entries[max_key].get().strip()
+
+                def _convert(value: str) -> float | None:
+                    if not value or value == "*":
+                        return None
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return None
+
+                if not min_text and not max_text:
+                    style_overrides.pop(dest_key, None)
+                    return
+
+                lo_value = _convert(min_text)
+                hi_value = _convert(max_text)
+                if lo_value is None and hi_value is None:
+                    style_overrides.pop(dest_key, None)
+                else:
+                    style_overrides[dest_key] = [lo_value, hi_value]
+
+            def _parse_ticks(entry_key: str, dest_key: str) -> None:
+                text = style_entries[entry_key].get().strip()
+                if not text:
+                    style_overrides.pop(dest_key, None)
+                    return
+                if text.startswith("[") or text.startswith("{"):
+                    try:
+                        style_overrides[dest_key] = json.loads(text)
+                        return
+                    except json.JSONDecodeError:
+                        pass
+                try:
+                    style_overrides[dest_key] = float(text)
+                except ValueError:
+                    style_overrides[dest_key] = text
+
+            _parse_window("x_window_min", "x_window_max", "x_window")
+            _parse_window("y_window_min", "y_window_max", "y_window")
+            _parse_ticks("x_ticks", "x_ticks")
+            _parse_ticks("y_ticks", "y_ticks")
+
             if payload["color"]:
                 style_overrides.setdefault("line_color", payload["color"])
             if style_overrides:

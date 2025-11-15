@@ -188,6 +188,21 @@ def generate_gnuplot_code(
         else:
             lines.append("unset logscale y")
 
+        x_range_clause = style_cfg.axis_range_clause("x")
+        if x_range_clause:
+            lines.append(x_range_clause)
+        else:
+            lines.append("set autoscale x")
+
+        if force_linear_y:
+            lines.append("set autoscale y")
+        else:
+            y_range_clause = style_cfg.axis_range_clause("y")
+            if y_range_clause:
+                lines.append(y_range_clause)
+            else:
+                lines.append("set autoscale y")
+
         if suppress_xtics:
             lines.append("set format x \"\"")
         elif style_cfg.x_tick_format:
@@ -201,6 +216,12 @@ def generate_gnuplot_code(
             lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
         else:
             lines.append("set format y")
+
+        lines.append(style_cfg.axis_ticks_clause("x"))
+        if force_linear_y:
+            lines.append("set ytics autofreq")
+        else:
+            lines.append(style_cfg.axis_ticks_clause("y"))
 
         if style_cfg.grid:
             lines.append(f"set grid {style_cfg.grid_layer}")
