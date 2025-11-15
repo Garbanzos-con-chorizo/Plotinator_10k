@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Sequence
 
 from config.schema import ConfigError
-
+from .data import import_data_file as _import_data_file
 from .migration import synthesise_temporary_project
 from .models import PlotinatorProject, ProjectMetadata, ProjectPaths
 from .validation import ProjectValidationError, ValidationResult, validate_project
@@ -31,6 +31,7 @@ class ProjectManager:
         )
         self._clean_snapshot: str | None = None
         self._dirty: bool = False
+        self._available_data_files: list[Path] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -75,7 +76,7 @@ class ProjectManager:
         """Persist the current project state to disk."""
 
         project = self.current_project()
-        self._enforce_valid(project, check_structure=False)
+        self._normalise_project_datasets(project)
         project.save()
         self._enforce_valid(project, check_structure=True)
         self._update_snapshot()
@@ -129,6 +130,29 @@ class ProjectManager:
 
         return self._resolve_project_path(self.current_project().paths.data_dir, parts)
 
+    @property
+    def available_data_files(self) -> tuple[Path, ...]:
+        """Return cached data files discovered within the project."""
+
+        return tuple(self._available_data_files)
+
+    def refresh_available_data_files(self) -> tuple[Path, ...]:
+        """Rescan the project's data directory and update the cache."""
+
+        project = self.current_project()
+        self._refresh_available_data_files(project)
+        return tuple(self._available_data_files)
+
+    def import_data_file(
+        self, source_path: Path | str, *, overwrite: bool = False
+    ) -> Path:
+        """Copy or link a data file into the project's ``data`` directory."""
+
+        project = self.current_project()
+        destination = _import_data_file(project, Path(source_path), overwrite=overwrite)
+        self._refresh_available_data_files(project)
+        return destination
+
     def exports_path(self, *parts: Path | str) -> Path:
         """Resolve a path within the project's exports directory."""
 
@@ -144,6 +168,8 @@ class ProjectManager:
 
     def _set_project(self, project: PlotinatorProject) -> None:
         self._project = project
+        self._normalise_project_datasets(project)
+        self._refresh_available_data_files(project)
         self._clean_snapshot = self._serialise_state(project)
         self._dirty = False
 
@@ -155,6 +181,7 @@ class ProjectManager:
             return
         self._clean_snapshot = self._serialise_state(project)
         self._dirty = False
+        self._refresh_available_data_files(project)
 
     def _load_project(self, location: Path) -> PlotinatorProject:
         if location.is_dir():
@@ -265,6 +292,66 @@ class ProjectManager:
                 ProjectManager._copy_directory(item, target_path)
             else:
                 shutil.copy2(item, target_path)
+
+    def _refresh_available_data_files(self, project: PlotinatorProject) -> None:
+        try:
+            data_root = project.paths.data_dir.resolve()
+        except FileNotFoundError:
+            data_root = project.paths.data_dir
+        if not data_root.exists():
+            self._available_data_files = []
+            return
+
+        files: list[Path] = []
+        try:
+            for candidate in data_root.rglob("*"):
+                try:
+                    if not candidate.is_file():
+                        continue
+                except OSError:
+                    continue
+                try:
+                    files.append(candidate.resolve())
+                except FileNotFoundError:
+                    continue
+        except OSError:
+            self._available_data_files = []
+            return
+
+        files.sort()
+        self._available_data_files = files
+
+    def _normalise_project_datasets(self, project: PlotinatorProject) -> None:
+        try:
+            data_root = project.paths.data_dir.resolve()
+        except FileNotFoundError:
+            data_root = project.paths.data_dir
+        try:
+            project_root = project.paths.root.resolve()
+        except FileNotFoundError:
+            project_root = project.paths.root
+
+        for fit in project.config.fits:
+            for dataset in fit.datasets:
+                source = dataset.data_source
+                candidate_path = source.path
+                if not candidate_path.is_absolute():
+                    candidate_path = project_root / candidate_path
+                try:
+                    resolved = candidate_path.resolve()
+                except FileNotFoundError:
+                    resolved = candidate_path
+                try:
+                    relative = resolved.relative_to(data_root)
+                except ValueError:
+                    continue
+
+                destination = data_root / relative
+                try:
+                    source.path = destination.resolve()
+                except FileNotFoundError:
+                    source.path = destination
+                source.original_path = relative.as_posix()
 
     def _serialise_state(self, project: PlotinatorProject) -> str:
         payload = {
