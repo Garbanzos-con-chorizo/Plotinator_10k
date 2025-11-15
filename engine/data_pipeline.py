@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import math
 import os
-from typing import Any, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Mapping, Sequence, Tuple
 
 import numpy as np
 
@@ -10,6 +11,60 @@ __all__ = [
     "prepare_datafile",
     "apply_preprocessing",
 ]
+
+
+def _resolve_dataset_path(
+    path: str,
+    *,
+    plot_cfg: Mapping[str, Any],
+    data_source: Mapping[str, Any] | None = None,
+) -> str:
+    if not path:
+        return path
+
+    path_obj = Path(path)
+    if path_obj.is_absolute():
+        return str(path_obj)
+
+    data_source = data_source or {}
+    project_data_root = data_source.get("project_data_root") or plot_cfg.get("project_data_root")
+    project_root = data_source.get("project_root") or plot_cfg.get("project_root")
+    config_base_dir = data_source.get("config_base_dir") or plot_cfg.get("config_base_dir")
+
+    candidates: list[Path] = []
+
+    def _add_candidate(base: Any, relative: Path) -> None:
+        if not base:
+            return
+        try:
+            base_path = Path(str(base))
+        except Exception:
+            return
+        candidates.append(base_path / relative)
+
+    _add_candidate(project_data_root, path_obj)
+    _add_candidate(project_root, path_obj)
+    _add_candidate(config_base_dir, path_obj)
+
+    if project_root and project_data_root:
+        try:
+            data_root_name = Path(str(project_data_root)).name
+        except Exception:
+            data_root_name = None
+        parts = path_obj.parts
+        if data_root_name and parts and parts[0].lower() == data_root_name.lower():
+            trimmed = Path(*parts[1:]) if len(parts) > 1 else None
+            if trimmed and trimmed.parts:
+                _add_candidate(project_root, trimmed)
+
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    if candidates:
+        return str(candidates[0])
+
+    return os.path.abspath(path)
 
 
 def _load_data_matrix(path: str) -> np.ndarray:
@@ -118,6 +173,8 @@ def apply_preprocessing(
 def prepare_datafile(plot_cfg: dict, plot_dir: str) -> dict:
     data_source = plot_cfg.get("data_source") or {}
     source_path = data_source.get("path") or plot_cfg.get("datafile")
+    if source_path:
+        source_path = _resolve_dataset_path(source_path, plot_cfg=plot_cfg, data_source=data_source)
     steps = data_source.get("preprocessing") or []
 
     if not steps:
