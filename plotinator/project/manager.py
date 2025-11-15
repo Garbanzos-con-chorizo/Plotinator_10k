@@ -131,6 +131,51 @@ class ProjectManager:
 
         return self._resolve_project_path(self.current_project().paths.plots_dir, parts)
 
+    # Data files -------------------------------------------------------
+
+    def import_data_file(self, source: Path | str) -> Path:
+        """Copy *source* into the project's data directory and return the new path."""
+
+        project = self.current_project()
+        data_root = project.paths.data_dir
+        data_root.mkdir(parents=True, exist_ok=True)
+
+        source_path = Path(source)
+        if not source_path.exists():
+            raise FileNotFoundError(f"Data file not found: {source_path}")
+
+        try:
+            source_resolved = source_path.resolve()
+        except OSError:
+            source_resolved = source_path
+
+        try:
+            data_root_resolved = data_root.resolve()
+        except OSError:
+            data_root_resolved = data_root
+
+        try:
+            # File already resides inside the project – return the resolved path.
+            relative_path = source_resolved.relative_to(data_root_resolved)
+            target_path = data_root_resolved / relative_path
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            if not target_path.exists():
+                shutil.copy2(source_resolved, target_path)
+            return target_path.resolve()
+        except ValueError:
+            pass
+
+        base_name = source_path.stem or "dataset"
+        suffix = source_path.suffix
+        candidate = data_root / f"{base_name}{suffix}"
+        counter = 1
+        while candidate.exists():
+            candidate = data_root / f"{base_name}_{counter}{suffix}"
+            counter += 1
+
+        shutil.copy2(source_resolved, candidate)
+        return candidate.resolve()
+
     # ------------------------------------------------------------------
     # Internal helpers
 
