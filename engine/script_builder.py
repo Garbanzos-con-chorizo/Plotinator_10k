@@ -14,6 +14,7 @@ from .config import normalize_layout
 __all__ = [
     "estimate_initial_params",
     "parse_fit_output",
+    "parse_fit_statistics",
     "compute_residual_metrics",
     "generate_gnuplot_code",
 ]
@@ -22,6 +23,11 @@ PYFIT_RE = re.compile(
     r"^PYFIT\s+([A-Za-z_]\w*)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)\s+([-+]?[\d\.]+(?:[eE][-+]?\d+)?)$",
     re.MULTILINE,
 )
+
+FIT_CHISQ_RE = re.compile(r"sum of squares of residuals\s*:\s*([-+\deE\.]+)")
+FIT_REDUCED_RE = re.compile(r"reduced chisquare\).*:\s*([-+\deE\.]+)")
+FIT_RMS_RE = re.compile(r"rms of residuals.*:\s*([-+\deE\.]+)")
+FIT_NDF_RE = re.compile(r"degrees of freedom.*:\s*(\d+)")
 
 
 def estimate_initial_params(
@@ -72,6 +78,38 @@ def parse_fit_output(output_text: str) -> dict:
     for name, val, err in PYFIT_RE.findall(output_text):
         params[name] = {"value": float(val), "error": float(err)}
     return params
+
+
+def parse_fit_statistics(output_text: str) -> dict[str, float]:
+    """Extract chi-squared style statistics from a gnuplot fit log."""
+
+    stats: dict[str, float] = {}
+
+    if match := FIT_CHISQ_RE.search(output_text):
+        try:
+            stats["chi_squared"] = float(match.group(1))
+        except ValueError:
+            pass
+
+    if match := FIT_REDUCED_RE.search(output_text):
+        try:
+            stats["reduced_chi_squared"] = float(match.group(1))
+        except ValueError:
+            pass
+
+    if match := FIT_RMS_RE.search(output_text):
+        try:
+            stats["rms"] = float(match.group(1))
+        except ValueError:
+            pass
+
+    if match := FIT_NDF_RE.search(output_text):
+        try:
+            stats["degrees_of_freedom"] = float(match.group(1))
+        except ValueError:
+            pass
+
+    return stats
 
 
 def compute_residual_metrics(
@@ -188,6 +226,21 @@ def generate_gnuplot_code(
         else:
             lines.append("unset logscale y")
 
+        x_range_clause = style_cfg.axis_range_clause("x")
+        if x_range_clause:
+            lines.append(x_range_clause)
+        else:
+            lines.append("set autoscale x")
+
+        if force_linear_y:
+            lines.append("set autoscale y")
+        else:
+            y_range_clause = style_cfg.axis_range_clause("y")
+            if y_range_clause:
+                lines.append(y_range_clause)
+            else:
+                lines.append("set autoscale y")
+
         if suppress_xtics:
             lines.append("set format x \"\"")
         elif style_cfg.x_tick_format:
@@ -201,6 +254,12 @@ def generate_gnuplot_code(
             lines.append(f"set format y \"{_escape(style_cfg.y_tick_format)}\"")
         else:
             lines.append("set format y")
+
+        lines.append(style_cfg.axis_ticks_clause("x"))
+        if force_linear_y:
+            lines.append("set ytics autofreq")
+        else:
+            lines.append(style_cfg.axis_ticks_clause("y"))
 
         if style_cfg.grid:
             lines.append(f"set grid {style_cfg.grid_layer}")

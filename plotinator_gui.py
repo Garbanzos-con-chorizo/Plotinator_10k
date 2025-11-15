@@ -4,16 +4,22 @@ import copy
 import json
 import math
 import queue
+import shutil
+import sys
 import threading
 import tkinter as tk
+import webbrowser
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import ttkbootstrap as ttkb
 
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 from engine import run_batch as engine_run_batch
+from plotinator import __version__ as PACKAGE_VERSION
+from plotinator.update_checker import ReleaseInfo, UpdateChecker, UpdateResult
 
 CONFIG_PATH = "config.json"
 
@@ -117,7 +123,7 @@ class PlotinatorApp(ttkb.Window):
 
     def __init__(self) -> None:
         super().__init__(themename="superhero")
-        self.title("Plotinator Open Beta v1.0")
+        self.title(f"Plotinator Open Beta v{PACKAGE_VERSION}")
         self.geometry("1200x800")
         self.resizable(True, True)
 
@@ -131,13 +137,56 @@ class PlotinatorApp(ttkb.Window):
         self._progress_total = 0
         self._progress_completed = 0
         self.status_var = tk.StringVar(self, value="Idle")
+        self._update_checker = UpdateChecker(
+            owner="plotinator-labs",
+            repo="Plotinator_10k",
+            current_version=PACKAGE_VERSION,
+        )
+        self._update_status_var = tk.StringVar(self, value=self._format_update_status())
+        self._settings_window: ttkb.Toplevel | None = None
         self._images: dict[str, tk.PhotoImage] = {}
+        self._content_paned: ttkb.Panedwindow | None = None
+        self._preview_container: ttkb.Frame | None = None
+        self._preview_header_var = tk.StringVar(self, value="Preview")
+        self._preview_notebook: ttkb.Notebook | None = None
+        self._preview_plot_tab: ttkb.Frame | None = None
+        self._preview_canvas: tk.Canvas | None = None
+        self._preview_canvas_image: int | None = None
+        self._preview_canvas_message: int | None = None
+        self._preview_residual_label: ttkb.Label | None = None
+        self._preview_summary_vars: dict[str, tk.StringVar] = {}
+        self._preview_photo_main: tk.PhotoImage | None = None
+        self._preview_photo_residual: tk.PhotoImage | None = None
+        self._preview_active_temp_dir: Path | None = None
+        self._preview_stale_temp_dirs: set[Path] = set()
+        self._preview_pane_visible = False
+        self._preview_history: list[dict[str, Any]] = []
+        self._preview_history_index: int | None = None
+        self._preview_history_limit = 5
+        self._preview_prev_button: ttkb.Button | None = None
+        self._preview_next_button: ttkb.Button | None = None
+        self._current_output_dir: Path | None = None
+        self._current_preview_title: str | None = None
+        self._latest_preview_title: str | None = None
         self._available_data_files: list[Path] = []
+        self._configure_styles()
         self._load_images()
 
         self._create_widgets()
+        self._hide_preview_pane()
         self.tree.bind("<Double-1>", self.on_double_click)
         self.load_config()
+        self._update_checker.start(self, self._handle_update_result)
+
+    # ------------------------------------------------------------------
+    def _configure_styles(self) -> None:
+        """Establish custom style rules for shared widgets."""
+
+        self._style.configure(
+            "Toolbar.TButton",
+            font=("Segoe UI", 11, "bold"),
+            padding=(14, 10),
+        )
 
     # ------------------------------------------------------------------
     def _create_widgets(self) -> None:
@@ -147,31 +196,46 @@ class PlotinatorApp(ttkb.Window):
             ttkb.Label(header, image=logo).pack(side="left", padx=(0, 10))
         ttkb.Label(
             header,
-            text="⚙️ Plotinator Open Beta v1.0",
+            text=f"⚙️ Plotinator Open Beta v{PACKAGE_VERSION}",
             font=("Segoe UI", 22, "bold"),
         ).pack(side="left")
         ttkb.Button(header, text="🌓", width=3, command=self.toggle_theme).pack(side="right", padx=8)
 
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
-        toolbar_logo = self._images.get("toolbar_button")
-        button_plan = [
-            ("Data Folder", lambda: self.select_folder(), "info-outline", True),
-            ("Add Fit", lambda: self.add_fit(), "success-outline", False),
-            ("Delete Fit", lambda: self.delete_fit(), "danger-outline", True),
-            ("Save Config", lambda: self.save_config(), "secondary-outline", False),
-            ("Run Batch", lambda: self.run_batch(), "success", True),
-            ("Stop Batch", lambda: self.stop_batch(), "danger", True),
-            ("Open Report", lambda: self.open_latest_report(), "primary-outline", False),
+        button_plan: Sequence[tuple[str, Callable[[], None], str]] = [
+            ("Data Folder", self.select_folder, "secondary-outline"),
+            ("Add Fit", self.add_fit, "primary"),
+            ("Delete Fit", self.delete_fit, "danger-outline"),
+            ("Save Config", self.save_config, "secondary"),
+            ("Run Batch", self.run_batch, "success"),
+            ("Stop Batch", self.stop_batch, "danger"),
+            ("Open Report", self.open_latest_report, "info"),
+            ("Settings", self.open_settings_dialog, "secondary-outline"),
         ]
-        for text, cmd, style, use_logo in button_plan:
-            kwargs: dict[str, Any] = {"text": text, "command": cmd, "bootstyle": style}
-            if use_logo and toolbar_logo is not None:
-                kwargs.update({"image": toolbar_logo, "compound": "left", "padding": (6, 4)})
-            ttkb.Button(toolbar, **kwargs).pack(side="left", padx=4)
+        for text, cmd, style in button_plan:
+            ttkb.Button(
+                toolbar,
+                text=text,
+                command=cmd,
+                bootstyle=style,
+                style="Toolbar.TButton",
+                width=14,
+            ).pack(side="left", padx=4)
 
-        table_frame = ttkb.Frame(self, padding=10)
-        table_frame.pack(fill="both", expand=True)
+        content_paned = ttkb.Panedwindow(self, orient="horizontal")
+        content_paned.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self._content_paned = content_paned
+
+        queue_frame = ttkb.Frame(content_paned, padding=0)
+        queue_frame.columnconfigure(0, weight=1)
+        queue_frame.rowconfigure(0, weight=1)
+        content_paned.add(queue_frame, weight=3)
+
+        queue_paned = ttkb.Panedwindow(queue_frame, orient="vertical")
+        queue_paned.grid(row=0, column=0, sticky="nsew")
+
+        table_frame = ttkb.Frame(queue_paned, padding=10)
         columns = ("Title", "Formula", "Datasets", "Residuals")
         self.tree = ttkb.Treeview(
             table_frame,
@@ -184,6 +248,85 @@ class PlotinatorApp(ttkb.Window):
             self.tree.heading(col, text=col)
             self.tree.column(col, width=width, anchor="w")
         self.tree.pack(fill="both", expand=True)
+        queue_paned.add(table_frame, weight=3)
+
+        log_frame = ttkb.Labelframe(queue_paned, padding=10)
+        if (log_icon := self._images.get("toolbar_log")) is not None:
+            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
+            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
+            log_frame.configure(labelwidget=log_label)
+        else:
+            log_frame.configure(text="Batch log")
+        queue_paned.add(log_frame, weight=2)
+
+        self._log_history: list[str] = []
+        self._log_filter_job: str | None = None
+        self._log_filter_var = tk.StringVar(self, value="")
+        self._log_matches_var = tk.StringVar(self, value="")
+
+        log_controls = ttkb.Frame(log_frame)
+        log_controls.pack(fill="x", pady=(0, 8))
+
+        clear_button = ttkb.Button(
+            log_controls,
+            text="Clear",
+            command=lambda: self._clear_logs(user_action=True),
+            bootstyle="secondary-outline",
+        )
+        clear_button.pack(side="right")
+
+        save_button = ttkb.Button(
+            log_controls,
+            text="Save…",
+            command=self._save_logs,
+            bootstyle="primary-outline",
+        )
+        save_button.pack(side="right", padx=(0, 6))
+
+        ttkb.Label(log_controls, textvariable=self._log_matches_var, anchor="w").pack(
+            side="left", padx=(0, 10)
+        )
+
+        ttkb.Label(log_controls, text="Filter:").pack(side="left")
+        self._log_filter_entry = ttkb.Entry(
+            log_controls,
+            textvariable=self._log_filter_var,
+            width=30,
+        )
+        self._log_filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        log_container = ttkb.Frame(log_frame)
+        log_container.pack(fill="both", expand=True)
+
+        y_scroll = ttkb.Scrollbar(log_container, orient="vertical")
+        y_scroll.pack(side="right", fill="y")
+        x_scroll = ttkb.Scrollbar(log_container, orient="horizontal")
+        x_scroll.pack(side="bottom", fill="x")
+
+        self.log_text = tk.Text(
+            log_container,
+            height=10,
+            wrap="none",
+            bg="#101820",
+            fg="#39FF14",
+            insertbackground="#39FF14",
+        )
+        self.log_text.pack(side="left", fill="both", expand=True)
+        self.log_text.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        y_scroll.configure(command=self.log_text.yview)
+        x_scroll.configure(command=self.log_text.xview)
+        self.log_text.tag_configure(
+            "filter_match", background="#F4D03F", foreground="#101820"
+        )
+
+        self._log_filter_var.trace_add("write", self._queue_log_filter_update)
+        self.log_text.bind("<Control-f>", self._focus_log_filter)
+
+        queue_paned.pane(table_frame, weight=3)
+        queue_paned.pane(log_frame, weight=2)
+
+
+        self._preview_container = self._build_preview_container(content_paned)
 
         progress_frame = ttkb.Frame(self, padding=(10, 0))
         progress_frame.pack(fill="x")
@@ -198,22 +341,771 @@ class PlotinatorApp(ttkb.Window):
         )
         self.progress.pack(fill="x")
 
-        log_frame = ttkb.Labelframe(self, padding=10)
-        if (log_icon := self._images.get("toolbar_log")) is not None:
-            log_label = ttkb.Label(log_frame, text="Batch log", image=log_icon, compound="left")
-            log_label.configure(font=("Segoe UI", 11, "bold"), padding=(4, 0))
-            log_frame.configure(labelwidget=log_label)
-        else:
-            log_frame.configure(text="Batch log")
-        log_frame.pack(fill="both", expand=True, padx=10, pady=10)
-        self.log_text = tk.Text(
-            log_frame,
-            height=10,
-            bg="#101820",
-            fg="#39FF14",
-            insertbackground="#39FF14",
+    # ------------------------------------------------------------------
+    def _format_timestamp(self, value: datetime) -> str:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.astimezone().strftime("%Y-%m-%d %H:%M")
+
+    def _format_update_status(self) -> str:
+        prefs = self._update_checker.preferences
+        if not prefs.enabled:
+            return "Automatic update checks are disabled."
+
+        result = self._update_checker.last_result
+        if result is None:
+            if prefs.last_checked is None:
+                return "Automatic update checks enabled. Next check will run shortly."
+            return f"Last checked on {self._format_timestamp(prefs.last_checked)}."
+
+        if result.error:
+            return f"Last check failed at {self._format_timestamp(result.checked_at)}: {result.error}"
+
+        if result.release is not None:
+            return (
+                f"Update available ({result.release.version_label}, checked"
+                f" {self._format_timestamp(result.checked_at)})."
+            )
+
+        return f"No updates found (checked {self._format_timestamp(result.checked_at)})."
+
+    def open_settings_dialog(self) -> None:
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            self._settings_window.focus_force()
+            return
+
+        self._update_status_var.set(self._format_update_status())
+
+        window = ttkb.Toplevel(self)
+        window.title("Application settings")
+        window.geometry("360x260")
+        window.resizable(False, False)
+        window.transient(self)
+        window.grab_set()
+        self._settings_window = window
+
+        enabled_var = tk.BooleanVar(value=self._update_checker.preferences.enabled)
+        interval_var = tk.IntVar(value=self._update_checker.preferences.interval_hours)
+
+        ttkb.Label(window, text="Updates", font=("Segoe UI", 12, "bold")).pack(
+            anchor="w", padx=12, pady=(12, 4)
         )
-        self.log_text.pack(fill="both", expand=True)
+        ttkb.Checkbutton(
+            window,
+            text="Check for new releases automatically",
+            variable=enabled_var,
+        ).pack(anchor="w", padx=18, pady=4)
+
+        freq_frame = ttkb.Frame(window)
+        freq_frame.pack(fill="x", padx=18, pady=(0, 12))
+        ttkb.Label(freq_frame, text="Check frequency (hours)").pack(side="left")
+        freq_spin = ttkb.Spinbox(
+            freq_frame,
+            from_=1,
+            to=168,
+            width=6,
+            textvariable=interval_var,
+        )
+        freq_spin.pack(side="left", padx=(10, 0))
+
+        status_label = ttkb.Label(
+            window,
+            textvariable=self._update_status_var,
+            wraplength=320,
+            bootstyle="info",
+            justify="left",
+        )
+        status_label.pack(fill="x", padx=12, pady=(0, 12))
+
+        buttons = ttkb.Frame(window)
+        buttons.pack(fill="x", padx=12, pady=(0, 12))
+
+        def _close() -> None:
+            if self._settings_window is window:
+                self._settings_window = None
+            window.destroy()
+
+        def _apply() -> None:
+            try:
+                interval_value = int(interval_var.get())
+            except (tk.TclError, ValueError):
+                interval_value = self._update_checker.preferences.interval_hours
+            self._update_checker.update_preferences(
+                enabled=bool(enabled_var.get()),
+                interval_hours=interval_value,
+            )
+            self._update_status_var.set(self._format_update_status())
+            self.show_toast("Settings updated", level="success")
+            _close()
+
+        def _check_now() -> None:
+            self._update_status_var.set("Checking for updates…")
+            self._update_checker.check_now(self, self._handle_update_result)
+
+        ttkb.Button(buttons, text="Check now", command=_check_now, bootstyle="info-outline").pack(
+            side="left"
+        )
+        ttkb.Button(buttons, text="Save", command=_apply, bootstyle="success").pack(
+            side="right"
+        )
+        ttkb.Button(buttons, text="Close", command=_close).pack(side="right", padx=(0, 8))
+
+        window.protocol("WM_DELETE_WINDOW", _close)
+
+    def _handle_update_result(self, result: UpdateResult) -> None:
+        self._update_status_var.set(self._format_update_status())
+        if result.error:
+            # Only surface failures when the user explicitly asked for a check.
+            if self._settings_window is not None and self._settings_window.winfo_exists():
+                self.show_toast(f"Update check failed: {result.error}", level="warning")
+            return
+
+        if result.release is not None:
+            self._announce_release(result.release)
+
+    def _announce_release(self, release: ReleaseInfo) -> None:
+        message = f"Update available: Plotinator {release.version_label}"
+        self.status_var.set(message)
+        self.show_toast(message, level="info")
+        summary = release.notes.splitlines()
+        excerpt = "\n".join(summary[:3]).strip()
+        if excerpt:
+            body = f"Plotinator {release.version_label} is available.\n\n{excerpt}\n\nOpen download page?"
+        else:
+            body = f"Plotinator {release.version_label} is available.\n\nOpen download page?"
+        if messagebox.askyesno("Update available", body, parent=self):
+            self._open_release_url(release.url)
+
+    def _open_release_url(self, url: str) -> None:
+        try:
+            webbrowser.open(url, new=2, autoraise=True)
+        except webbrowser.Error:
+            self.show_toast("Unable to open browser", level="error")
+
+    # ------------------------------------------------------------------
+    def _build_preview_container(self, parent: ttkb.Panedwindow) -> ttkb.Frame:
+        container = ttkb.Frame(parent, padding=10)
+        container.columnconfigure(0, weight=1)
+
+        header = ttkb.Label(
+            container,
+            textvariable=self._preview_header_var,
+            font=("Segoe UI", 14, "bold"),
+            anchor="w",
+        )
+        header.pack(anchor="w")
+
+        controls = ttkb.Frame(container)
+        controls.pack(fill="x", pady=(4, 0))
+        prev_button = ttkb.Button(
+            controls,
+            text="◀ Previous",
+            bootstyle="secondary-outline",
+            command=self._show_previous_preview,
+            width=14,
+        )
+        prev_button.pack(side="left")
+        next_button = ttkb.Button(
+            controls,
+            text="Next ▶",
+            bootstyle="secondary-outline",
+            command=self._show_next_preview,
+            width=14,
+        )
+        next_button.pack(side="right")
+        self._preview_prev_button = prev_button
+        self._preview_next_button = next_button
+
+        notebook = ttkb.Notebook(container)
+        notebook.pack(fill="both", expand=True, pady=(8, 0))
+        self._preview_notebook = notebook
+
+        plot_tab = ttkb.Frame(notebook)
+        plot_tab.columnconfigure(0, weight=1)
+        plot_tab.rowconfigure(0, weight=1)
+        notebook.add(plot_tab, text="Plot")
+        self._preview_plot_tab = plot_tab
+
+        canvas_frame = ttkb.Frame(plot_tab)
+        canvas_frame.grid(row=0, column=0, sticky="nsew")
+        canvas_frame.columnconfigure(0, weight=1)
+        canvas_frame.rowconfigure(0, weight=1)
+
+        canvas = tk.Canvas(canvas_frame, background="#0C1F2C", highlightthickness=0)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttkb.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttkb.Scrollbar(canvas_frame, orient="horizontal", command=canvas.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        canvas.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        self._preview_canvas = canvas
+
+        residuals_tab = ttkb.Frame(notebook, padding=12)
+        notebook.add(residuals_tab, text="Residuals")
+        residual_label = ttkb.Label(
+            residuals_tab,
+            text="Residual preview not available yet.",
+            anchor="center",
+            justify="center",
+            wraplength=280,
+        )
+        residual_label.pack(fill="both", expand=True)
+        self._preview_residual_label = residual_label
+
+        summary_tab = ttkb.Frame(notebook, padding=12)
+        summary_tab.columnconfigure(1, weight=1)
+        notebook.add(summary_tab, text="Summary")
+
+        summary_fields = [
+            ("χ²", "chi2"),
+            ("Reduced χ²", "reduced_chi2"),
+            ("RMS", "rms"),
+            ("Mean residual", "mean"),
+            ("Std residual", "std"),
+            ("Fit errors", "fit_error"),
+        ]
+        for row, (label_text, key) in enumerate(summary_fields):
+            ttkb.Label(summary_tab, text=label_text).grid(
+                row=row,
+                column=0,
+                sticky="w",
+                padx=(0, 10),
+                pady=4,
+            )
+            var = tk.StringVar(value="—")
+            self._preview_summary_vars[key] = var
+            ttkb.Label(
+                summary_tab,
+                textvariable=var,
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+                justify="left",
+                wraplength=260,
+            ).grid(row=row, column=1, sticky="ew", pady=4)
+
+        self._update_preview_message("Preview will appear once a fit starts.")
+        self._update_preview_history_buttons()
+        return container
+
+    # ------------------------------------------------------------------
+    def _update_preview_message(self, message: str) -> None:
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        self._preview_canvas_image = None
+        self._preview_canvas_message = canvas.create_text(
+            16,
+            16,
+            anchor="nw",
+            text=message,
+            fill="#F8F9FA",
+            font=("Segoe UI", 11),
+        )
+        canvas.configure(scrollregion=(0, 0, canvas.winfo_width(), canvas.winfo_height()))
+
+    # ------------------------------------------------------------------
+    def _show_preview_image(self, image: tk.PhotoImage) -> None:
+        canvas = self._preview_canvas
+        if canvas is None:
+            return
+        canvas.delete("all")
+        self._preview_canvas_message = None
+        self._preview_canvas_image = canvas.create_image(0, 0, anchor="nw", image=image)
+        canvas.configure(scrollregion=(0, 0, image.width(), image.height()))
+
+    # ------------------------------------------------------------------
+    def _clear_preview_summary(self) -> None:
+        for var in self._preview_summary_vars.values():
+            var.set("—")
+
+    # ------------------------------------------------------------------
+    def _queue_preview_temp_cleanup(self, directory: Path | None) -> None:
+        if directory is None:
+            return
+        self._preview_stale_temp_dirs.add(directory)
+
+    # ------------------------------------------------------------------
+    def _cleanup_stale_preview_dirs(self) -> None:
+        stale = list(self._preview_stale_temp_dirs)
+        self._preview_stale_temp_dirs.clear()
+        for directory in stale:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    def _cleanup_all_preview_temp_dirs(self) -> None:
+        if self._preview_active_temp_dir is not None:
+            self._preview_stale_temp_dirs.add(self._preview_active_temp_dir)
+            self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
+
+    # ------------------------------------------------------------------
+    def _activate_preview_temp_dir(self, payload: dict[str, Any]) -> None:
+        cleanup_dir = payload.get("cleanup_dir")
+        if not cleanup_dir:
+            return
+        try:
+            directory = Path(str(cleanup_dir))
+        except (TypeError, ValueError, OSError):
+            return
+        if directory == self._preview_active_temp_dir:
+            return
+        if not self._is_preview_dir_in_history(self._preview_active_temp_dir):
+            self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = directory
+
+    # ------------------------------------------------------------------
+    def _result_from_preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result_payload = payload.get("result")
+        if isinstance(result_payload, dict):
+            return copy.deepcopy(result_payload)
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        return {
+            "output_plot": payload.get("output_plot") or source.get("output_plot"),
+            "residuals_plot": payload.get("residuals_plot") or source.get("residuals_plot"),
+            "metrics": copy.deepcopy(payload.get("metrics") or {}),
+            "parameters": copy.deepcopy(payload.get("parameters") or {}),
+        }
+
+    # ------------------------------------------------------------------
+    def _load_preview_from_payload(self, payload: dict[str, Any], title: str) -> None:
+        result = self._result_from_preview_payload(payload)
+        self._apply_preview_result_data(result)
+        plot_loaded = self._update_main_image_from_path(result.get("output_plot"))
+        if not plot_loaded:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+        self._update_residual_image_from_path(result.get("residuals_plot"))
+
+    # ------------------------------------------------------------------
+    def _extract_cleanup_dir(self, payload: dict[str, Any] | None) -> Path | None:
+        if not isinstance(payload, dict):
+            return None
+        cleanup_dir = payload.get("cleanup_dir")
+        if not cleanup_dir:
+            return None
+        try:
+            return Path(str(cleanup_dir))
+        except (TypeError, ValueError, OSError):
+            return None
+
+    # ------------------------------------------------------------------
+    def _is_preview_dir_in_history(self, directory: Path | None) -> bool:
+        if directory is None:
+            return False
+        for entry in self._preview_history:
+            history_dir = self._extract_cleanup_dir(entry.get("preview"))
+            if history_dir is not None and history_dir == directory:
+                return True
+        return False
+
+    # ------------------------------------------------------------------
+    def _record_preview_history(
+        self,
+        title: str,
+        payload: dict[str, Any] | None,
+        result: dict[str, Any] | None,
+    ) -> None:
+        payload_copy = copy.deepcopy(payload) if isinstance(payload, dict) else None
+        result_copy = copy.deepcopy(result) if isinstance(result, dict) else None
+
+        history = self._preview_history
+        removed_forward: list[dict[str, Any]] = []
+        if self._preview_history_index is None:
+            if history:
+                removed_forward = history[:]
+            history.clear()
+        elif self._preview_history_index < len(history) - 1:
+            removed_forward = history[self._preview_history_index + 1 :]
+            del history[self._preview_history_index + 1 :]
+
+        for entry in removed_forward:
+            cleanup_dir = self._extract_cleanup_dir(entry.get("preview"))
+            if cleanup_dir is not None and cleanup_dir != self._preview_active_temp_dir:
+                self._queue_preview_temp_cleanup(cleanup_dir)
+
+        history.append({"title": title, "preview": payload_copy, "result": result_copy})
+
+        while len(history) > self._preview_history_limit:
+            removed_entry = history.pop(0)
+            cleanup_dir = self._extract_cleanup_dir(removed_entry.get("preview"))
+            if cleanup_dir is not None and cleanup_dir != self._preview_active_temp_dir:
+                self._queue_preview_temp_cleanup(cleanup_dir)
+
+        self._preview_history_index = len(history) - 1
+        self._update_preview_history_buttons()
+
+    # ------------------------------------------------------------------
+    def _update_preview_history_buttons(self) -> None:
+        prev_button = self._preview_prev_button
+        next_button = self._preview_next_button
+        history = self._preview_history
+        index = self._preview_history_index if self._preview_history_index is not None else -1
+
+        if prev_button is not None:
+            if index > 0:
+                prev_button.state(["!disabled"])
+            else:
+                prev_button.state(["disabled"])
+
+        if next_button is not None:
+            if 0 <= index < len(history) - 1:
+                next_button.state(["!disabled"])
+            else:
+                next_button.state(["disabled"])
+
+    # ------------------------------------------------------------------
+    def _show_previous_preview(self) -> None:
+        if self._preview_history_index is None or self._preview_history_index <= 0:
+            return
+        self._preview_history_index -= 1
+        entry = self._preview_history[self._preview_history_index]
+        self.render_batch_preview(
+            entry.get("title", "Untitled"),
+            entry.get("preview"),
+            entry.get("result"),
+            record_history=False,
+            show_notifications=False,
+        )
+        self._update_preview_history_buttons()
+
+    # ------------------------------------------------------------------
+    def _show_next_preview(self) -> None:
+        if self._preview_history_index is None:
+            return
+        if self._preview_history_index >= len(self._preview_history) - 1:
+            return
+        self._preview_history_index += 1
+        entry = self._preview_history[self._preview_history_index]
+        self.render_batch_preview(
+            entry.get("title", "Untitled"),
+            entry.get("preview"),
+            entry.get("result"),
+            record_history=False,
+            show_notifications=False,
+        )
+        self._update_preview_history_buttons()
+
+    # ------------------------------------------------------------------
+    def _ensure_preview_pane(self) -> None:
+        if self._content_paned is None or self._preview_container is None:
+            return
+        if not self._preview_pane_visible:
+            try:
+                self._content_paned.add(self._preview_container, weight=2)
+            except tk.TclError:
+                return
+            self._preview_pane_visible = True
+        if self._preview_notebook is not None and self._preview_plot_tab is not None:
+            self._preview_notebook.select(self._preview_plot_tab)
+
+    # ------------------------------------------------------------------
+    def _hide_preview_pane(self) -> None:
+        if self._content_paned is None or self._preview_container is None:
+            return
+        if self._preview_pane_visible:
+            try:
+                self._content_paned.forget(self._preview_container)
+            except tk.TclError:
+                pass
+            self._preview_pane_visible = False
+        self._preview_header_var.set("Preview")
+        self._update_preview_message("Preview will appear once a fit starts.")
+        self._clear_preview_summary()
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview not available yet.",
+            )
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_preview_title = None
+        self._latest_preview_title = None
+        if self._preview_history:
+            for entry in self._preview_history:
+                cleanup_dir = self._extract_cleanup_dir(entry.get("preview"))
+                if cleanup_dir is not None:
+                    self._preview_stale_temp_dirs.add(cleanup_dir)
+            self._preview_history.clear()
+        self._preview_history_index = None
+        self._update_preview_history_buttons()
+        self._cleanup_all_preview_temp_dirs()
+
+    # ------------------------------------------------------------------
+    def _update_main_image_from_path(self, path: Path | str | None) -> bool:
+        if path in (None, ""):
+            return False
+        candidate = Path(str(path))
+        if not candidate.exists():
+            return False
+        try:
+            image = tk.PhotoImage(file=candidate.as_posix())
+        except tk.TclError:
+            return False
+        self._preview_photo_main = image
+        self._show_preview_image(image)
+        return True
+
+    # ------------------------------------------------------------------
+    def _update_residual_image_from_path(self, path: Path | str | None) -> bool:
+        label = self._preview_residual_label
+        if label is None:
+            return False
+        if path in (None, ""):
+            label.configure(image="", text="Residual preview not generated for this fit.")
+            self._preview_photo_residual = None
+            return False
+        candidate = Path(str(path))
+        if not candidate.exists():
+            label.configure(image="", text="Residual preview not generated for this fit.")
+            self._preview_photo_residual = None
+            return False
+        try:
+            image = tk.PhotoImage(file=candidate.as_posix())
+        except tk.TclError:
+            label.configure(image="", text="Residual preview failed to load.")
+            self._preview_photo_residual = None
+            return False
+        if max(image.width(), image.height()) > 320:
+            image = self._scale_image(image, 320)
+        self._preview_photo_residual = image
+        label.configure(image=image, text="")
+        return True
+
+    # ------------------------------------------------------------------
+    def _load_preview_images(self, title: str) -> None:
+        base = self._current_output_dir
+        if base is None:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+            return
+        safe_title = title.replace(" ", "_")
+        plot_dir = base / f"plot_{safe_title}"
+        plot_loaded = self._update_main_image_from_path(plot_dir / "plot.png")
+        if not plot_loaded:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+        self._update_residual_image_from_path(plot_dir / "residuals.png")
+
+    # ------------------------------------------------------------------
+    def _set_summary_value(self, key: str, value: Any) -> None:
+        var = self._preview_summary_vars.get(key)
+        if var is None:
+            return
+        if value in (None, ""):
+            var.set("—")
+            return
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            var.set(str(value))
+            return
+        if math.isnan(numeric):
+            var.set("—")
+            return
+        var.set(f"{numeric:.4g}")
+
+    # ------------------------------------------------------------------
+    def _apply_preview_result_data(self, result: dict[str, Any]) -> None:
+        metrics = result.get("metrics") or {}
+        self._set_summary_value("chi2", metrics.get("chi_squared") or metrics.get("chi2") or metrics.get("chisq"))
+        self._set_summary_value(
+            "reduced_chi2",
+            metrics.get("reduced_chi_squared")
+            or metrics.get("reduced_chi2")
+            or metrics.get("reduced_chisq"),
+        )
+        self._set_summary_value("rms", metrics.get("rmse") or metrics.get("rms"))
+        self._set_summary_value("mean", metrics.get("mean"))
+        self._set_summary_value("std", metrics.get("std"))
+
+        parameters = result.get("parameters") or {}
+        fit_errors: list[str] = []
+        for name, payload in parameters.items():
+            if not isinstance(payload, dict):
+                continue
+            error = payload.get("error")
+            if error in (None, ""):
+                continue
+            try:
+                fit_errors.append(f"{name} ± {float(error):.3g}")
+            except (TypeError, ValueError):
+                fit_errors.append(f"{name} ± {error}")
+        summary = ", ".join(fit_errors) if fit_errors else "—"
+        fit_var = self._preview_summary_vars.get("fit_error")
+        if fit_var is not None:
+            fit_var.set(summary)
+
+    # ------------------------------------------------------------------
+    def _load_preview_from_result(self, result: dict[str, Any]) -> None:
+        plot_path = result.get("output_plot") or (result.get("canvases") or {}).get("combined")
+        residual_path = result.get("residuals_plot") or (result.get("canvases") or {}).get("residuals")
+        plot_loaded = self._update_main_image_from_path(plot_path)
+        if not plot_loaded and self._current_preview_title:
+            self._load_preview_images(self._current_preview_title)
+        self._update_residual_image_from_path(residual_path)
+
+    # ------------------------------------------------------------------
+    def render_batch_preview(
+        self,
+        title: str,
+        preview_payload: dict[str, Any] | None,
+        result_payload: dict[str, Any] | None = None,
+        *,
+        record_history: bool = True,
+        show_notifications: bool = True,
+    ) -> None:
+        payload_copy = copy.deepcopy(preview_payload) if isinstance(preview_payload, dict) else None
+        result_override = copy.deepcopy(result_payload) if isinstance(result_payload, dict) else None
+
+        if payload_copy and result_override and not isinstance(payload_copy.get("result"), dict):
+            payload_copy["result"] = copy.deepcopy(result_override)
+
+        self._ensure_preview_pane()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._current_preview_title = title
+        if record_history:
+            self._latest_preview_title = title
+
+        if payload_copy:
+            self._activate_preview_temp_dir(payload_copy)
+        else:
+            if not self._is_preview_dir_in_history(self._preview_active_temp_dir):
+                self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+            self._preview_active_temp_dir = None
+
+        result_data: dict[str, Any] | None = None
+        if payload_copy:
+            try:
+                result_data = self._result_from_preview_payload(payload_copy)
+            except Exception as exc:  # noqa: BLE001 - surface via notification
+                result_data = None
+                if show_notifications:
+                    self.show_toast(f"Preview data unavailable for {title}", level="warning")
+                self._append_log(f"[PREVIEW] Failed to parse preview payload for {title}: {exc}\n")
+
+        if result_data is None and result_override is not None:
+            result_data = result_override
+
+        if result_data:
+            self._apply_preview_result_data(result_data)
+        else:
+            self._clear_preview_summary()
+
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        main_loaded = False
+        residual_loaded = False
+        used_fallback = False
+        plot_path = result_data.get("output_plot") if isinstance(result_data, dict) else None
+        residual_path = result_data.get("residuals_plot") if isinstance(result_data, dict) else None
+
+        if plot_path:
+            main_loaded = self._update_main_image_from_path(plot_path)
+            if not main_loaded and show_notifications:
+                self.show_toast(f"Preview image missing for {title}", level="warning")
+        else:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+
+        if not main_loaded:
+            if self._current_output_dir is not None:
+                self._load_preview_images(title)
+                if self._preview_canvas_image is not None:
+                    used_fallback = True
+                    main_loaded = True
+            if not main_loaded:
+                self._preview_photo_main = None
+                if show_notifications and (plot_path or payload_copy or result_override):
+                    self.show_toast(f"Preview not available for {title}", level="info")
+
+        if residual_path and not used_fallback:
+            residual_loaded = self._update_residual_image_from_path(residual_path)
+            if not residual_loaded and show_notifications:
+                self.show_toast(f"Residual preview missing for {title}", level="info")
+        elif not used_fallback:
+            self._update_residual_image_from_path(None)
+
+        if record_history:
+            self._record_preview_history(title, payload_copy, result_data)
+        else:
+            self._update_preview_history_buttons()
+
+        self._cleanup_stale_preview_dirs()
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_start(self, title: str) -> None:
+        self._ensure_preview_pane()
+        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._update_preview_message(f"Preparing preview for \"{title}\"…")
+        self._clear_preview_summary()
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview will appear after the fit completes.",
+            )
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_preview_title = title
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_complete(
+        self, title: str, payload: dict[str, Any] | None = None
+    ) -> None:
+        self.render_batch_preview(title, payload)
+
+    # ------------------------------------------------------------------
+    def _on_preview_plot_error(self, title: str, error: str) -> None:
+        self._ensure_preview_pane()
+        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
+        self._preview_header_var.set(f"Preview: {title}")
+        self._update_preview_message(f"Preview unavailable: {error}")
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(
+                image="",
+                text="Residual preview unavailable due to error.",
+            )
+        self._clear_preview_summary()
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+
+    # ------------------------------------------------------------------
+    def _on_preview_job_complete(self, event: dict[str, Any]) -> None:
+        results: list[dict[str, Any]] = event.get("results") or []
+        if not results:
+            return
+        target_title = self._latest_preview_title or results[-1].get("title")
+        if not target_title:
+            return
+        for result in results:
+            if result.get("title") == target_title:
+                self._preview_header_var.set(f"Preview: {target_title}")
+                self._ensure_preview_pane()
+                self._apply_preview_result_data(result)
+                self._load_preview_from_result(result)
+                break
+
+    # ------------------------------------------------------------------
+    def _on_preview_job_failure(self, message: str) -> None:
+        self._ensure_preview_pane()
+        self._preview_header_var.set("Preview")
+        self._update_preview_message(message)
+        if self._preview_residual_label is not None:
+            self._preview_residual_label.configure(image="", text="Residual preview unavailable.")
+        self._clear_preview_summary()
+        self._preview_photo_main = None
+        self._preview_photo_residual = None
+        self._current_output_dir = None
+        self._current_preview_title = None
+        self._latest_preview_title = None
+        self._cleanup_all_preview_temp_dirs()
+
+    # ------------------------------------------------------------------
+    def _reset_preview_state(self) -> None:
+        self._current_output_dir = None
+        self._hide_preview_pane()
 
     # ------------------------------------------------------------------
     def _scale_image(self, image: tk.PhotoImage, target: int) -> tk.PhotoImage:
@@ -245,6 +1137,14 @@ class PlotinatorApp(ttkb.Window):
             self.iconphoto(True, icon)
             self._images["icon_header"] = self._scale_image(icon, 64)
             self._images["icon_toast"] = self._scale_image(icon, 32)
+
+        if sys.platform.startswith("win"):
+            ico_path = base_path / "packaging" / "windows" / "plotinator.ico"
+            if ico_path.exists():
+                try:
+                    self.iconbitmap(str(ico_path))
+                except tk.TclError:
+                    pass
 
         toolbar_icon = self._images.get("toolbar")
         if toolbar_icon is not None:
@@ -414,7 +1314,8 @@ class PlotinatorApp(ttkb.Window):
 
         self.save_config()
         self.progress.configure(value=0)
-        self.log_text.delete("1.0", tk.END)
+        self._clear_logs(user_action=False)
+        self._reset_preview_state()
         self._progress_total = 0
         self._progress_completed = 0
         self._worker = BatchWorker(self.config_path)
@@ -494,12 +1395,22 @@ class PlotinatorApp(ttkb.Window):
             ts = event.get("timestamp", "")
             self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
             self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
+            output_dir = event.get("output_dir")
+            if output_dir:
+                try:
+                    self._current_output_dir = Path(str(output_dir)).resolve()
+                except OSError:
+                    self._current_output_dir = Path(str(output_dir))
+            else:
+                self._current_output_dir = None
+            self._latest_preview_title = None
             return
 
         if etype == "plot-start":
             title = event.get("title", "Untitled")
             self._append_log(f"[RUN] Processing: {title}\n")
             self._set_status(f"Processing plot: {title}")
+            self._on_preview_plot_start(title)
             return
 
         if etype == "plot-complete":
@@ -511,6 +1422,19 @@ class PlotinatorApp(ttkb.Window):
             self._set_status(
                 f"Completed {self._progress_completed}/{total_display}: {title}"
             )
+            preview_payload = event.get("preview")
+            if isinstance(preview_payload, dict):
+                preview_payload = dict(preview_payload)
+            else:
+                preview_payload = None
+            result_payload = event.get("result")
+            if isinstance(result_payload, dict):
+                result_payload = dict(result_payload)
+                if preview_payload is not None:
+                    preview_payload.setdefault("result", result_payload)
+            else:
+                result_payload = None
+            self.render_batch_preview(title, preview_payload, result_payload)
             return
 
         if etype == "plot-error":
@@ -521,6 +1445,7 @@ class PlotinatorApp(ttkb.Window):
             self._append_log(f"[X] Error in {title}: {error_msg}\n")
             self.show_toast(f"Plot failed: {title}", level="error")
             self._set_status(f"Plot error: {title}")
+            self._on_preview_plot_error(title, error_msg)
             return
 
         if etype == "report-markdown-ready":
@@ -557,6 +1482,7 @@ class PlotinatorApp(ttkb.Window):
                 self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
             self.show_toast("Batch complete", level="success")
             self._set_status("Batch complete")
+            self._on_preview_job_complete(event)
             self._event_queue = None
             self._worker = None
             return
@@ -567,6 +1493,7 @@ class PlotinatorApp(ttkb.Window):
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
+            self._on_preview_job_failure(error_msg)
             self._event_queue = None
             self._worker = None
             return
@@ -577,6 +1504,7 @@ class PlotinatorApp(ttkb.Window):
             self.show_toast(error_msg, level="error")
             messagebox.showerror("Plotinator", error_msg)
             self._set_status(f"Batch failed: {error_msg}")
+            self._on_preview_job_failure(error_msg)
             self._event_queue = None
             self._worker = None
             return
@@ -585,6 +1513,7 @@ class PlotinatorApp(ttkb.Window):
             self._append_log("[CANCELLED] Batch cancelled by user.\n")
             self.show_toast("Batch cancelled", level="warning")
             self._set_status("Batch cancelled")
+            self._on_preview_job_failure("Batch cancelled")
             self._event_queue = None
             self._worker = None
             return
@@ -606,11 +1535,99 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def _append_log(self, text: str) -> None:
+        self._log_history.append(text)
+
         def _write() -> None:
             self.log_text.insert(tk.END, text)
             self.log_text.see(tk.END)
+            self._apply_log_filter()
 
         self.after(0, _write)
+
+    # ------------------------------------------------------------------
+    def _queue_log_filter_update(self, *_: object) -> None:
+        if self._log_filter_job is not None:
+            try:
+                self.after_cancel(self._log_filter_job)
+            except tk.TclError:
+                pass
+        self._log_filter_job = self.after(150, self._apply_log_filter)
+
+    # ------------------------------------------------------------------
+    def _apply_log_filter(self) -> None:
+        self._log_filter_job = None
+        pattern = self._log_filter_var.get().strip()
+        self.log_text.tag_remove("filter_match", "1.0", tk.END)
+
+        if not pattern:
+            self._log_matches_var.set("")
+            return
+
+        start = "1.0"
+        matches = 0
+        while True:
+            idx = self.log_text.search(pattern, start, stopindex=tk.END, nocase=True)
+            if not idx:
+                break
+            end_idx = f"{idx}+{len(pattern)}c"
+            self.log_text.tag_add("filter_match", idx, end_idx)
+            start = end_idx
+            matches += 1
+
+        if matches:
+            label = "match" if matches == 1 else "matches"
+            self._log_matches_var.set(f"{matches} {label}")
+        else:
+            self._log_matches_var.set("No matches")
+
+    # ------------------------------------------------------------------
+    def _focus_log_filter(self, event=None) -> str:
+        self._log_filter_entry.focus_set()
+        self._log_filter_entry.select_range(0, tk.END)
+        return "break"
+
+    # ------------------------------------------------------------------
+    def _clear_logs(self, *, user_action: bool) -> None:
+        if self._log_filter_job is not None:
+            try:
+                self.after_cancel(self._log_filter_job)
+            except tk.TclError:
+                pass
+            self._log_filter_job = None
+        self._log_history.clear()
+        self.log_text.delete("1.0", tk.END)
+        self._apply_log_filter()
+        if user_action:
+            self.show_toast("Log cleared", level="info")
+
+    # ------------------------------------------------------------------
+    def _save_logs(self) -> None:
+        if not self._log_history:
+            self.show_toast("No log entries to save yet", level="info")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            title="Save log",
+            defaultextension=".log",
+            filetypes=[
+                ("Log files", "*.log"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
+            ],
+        )
+        if not file_path:
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as handle:
+                handle.write("".join(self._log_history))
+        except OSError as exc:
+            self.show_toast("Failed to save logs", level="error")
+            self._append_log(f"[X] Could not save logs: {exc}\n")
+            return
+
+        self.show_toast("Logs saved", level="success")
+        self._append_log(f"[INFO] Logs saved to: {file_path}\n")
 
     # ------------------------------------------------------------------
     def open_latest_report(self) -> None:
@@ -657,6 +1674,7 @@ class PlotinatorApp(ttkb.Window):
         stop_runner = getattr(self, "_stop_runner_thread", None)
         if callable(stop_runner):
             stop_runner()
+        self._cleanup_all_preview_temp_dirs()
         super().destroy()
 
     # ------------------------------------------------------------------
@@ -684,9 +1702,11 @@ class PlotinatorApp(ttkb.Window):
             data = fit.to_dict(relative_to=self.job.base_path)
         else:
             data = copy.deepcopy(base)
+        style_data = copy.deepcopy(data.get("style", {})) if isinstance(data.get("style"), dict) else {}
+
         editor = ttkb.Toplevel(self)
         editor.title("Fit details")
-        editor.geometry("620x520")
+        editor.geometry("700x560")
         editor.grab_set()
 
         notebook = ttkb.Notebook(editor)
@@ -694,9 +1714,11 @@ class PlotinatorApp(ttkb.Window):
 
         general_tab = ttkb.Frame(notebook, padding=10)
         layout_tab = ttkb.Frame(notebook, padding=10)
+        style_tab = ttkb.Frame(notebook, padding=10)
         datasets_tab = ttkb.Frame(notebook, padding=10)
         notebook.add(general_tab, text="General")
         notebook.add(layout_tab, text="Layout")
+        notebook.add(style_tab, text="Style")
         notebook.add(datasets_tab, text="Datasets")
 
         # General tab --------------------------------------------------
@@ -744,6 +1766,96 @@ class PlotinatorApp(ttkb.Window):
         ttkb.Checkbutton(layout_tab, text="Show legend", variable=show_legend).grid(
             row=4, column=0, columnspan=2, sticky="w", padx=5, pady=6
         )
+
+        # Style tab ----------------------------------------------------
+        style_tab.columnconfigure(1, weight=1)
+        style_tab.columnconfigure(3, weight=1)
+
+        def _extract_window_entries(value: object) -> tuple[str, str]:
+            lo_text = ""
+            hi_text = ""
+            if isinstance(value, (list, tuple)):
+                if len(value) > 0 and value[0] not in (None, ""):
+                    lo_text = str(value[0])
+                if len(value) > 1 and value[1] not in (None, ""):
+                    hi_text = str(value[1])
+            elif isinstance(value, dict):
+                if value.get("min") not in (None, ""):
+                    lo_text = str(value.get("min"))
+                if value.get("max") not in (None, ""):
+                    hi_text = str(value.get("max"))
+            elif isinstance(value, str):
+                stripped = value.strip().strip("[]")
+                parts = [part.strip() for part in stripped.split(",") if part.strip()]
+                if parts:
+                    lo_text = parts[0]
+                if len(parts) > 1:
+                    hi_text = parts[1]
+            elif value not in (None, ""):
+                try:
+                    lo_text = str(float(value))
+                except (TypeError, ValueError):
+                    lo_text = str(value)
+            return lo_text, hi_text
+
+        def _format_ticks_value(value: object) -> str:
+            if value in (None, ""):
+                return ""
+            if isinstance(value, (list, tuple, dict)):
+                try:
+                    return json.dumps(value)
+                except TypeError:
+                    return str(value)
+            return str(value)
+
+        style_entries: dict[str, ttkb.Entry] = {}
+
+        ttkb.Label(style_tab, text="X axis window").grid(row=0, column=0, sticky="w", padx=5, pady=6)
+        x_min_entry = ttkb.Entry(style_tab, width=12)
+        x_min_entry.grid(row=0, column=1, sticky="ew", padx=5, pady=6)
+        ttkb.Label(style_tab, text="to").grid(row=0, column=2, sticky="w", padx=5, pady=6)
+        x_max_entry = ttkb.Entry(style_tab, width=12)
+        x_max_entry.grid(row=0, column=3, sticky="ew", padx=5, pady=6)
+        x_lo, x_hi = _extract_window_entries(style_data.get("x_window"))
+        if x_lo:
+            x_min_entry.insert(0, x_lo)
+        if x_hi:
+            x_max_entry.insert(0, x_hi)
+        style_entries["x_window_min"] = x_min_entry
+        style_entries["x_window_max"] = x_max_entry
+
+        ttkb.Label(style_tab, text="Y axis window").grid(row=1, column=0, sticky="w", padx=5, pady=6)
+        y_min_entry = ttkb.Entry(style_tab, width=12)
+        y_min_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=6)
+        ttkb.Label(style_tab, text="to").grid(row=1, column=2, sticky="w", padx=5, pady=6)
+        y_max_entry = ttkb.Entry(style_tab, width=12)
+        y_max_entry.grid(row=1, column=3, sticky="ew", padx=5, pady=6)
+        y_lo, y_hi = _extract_window_entries(style_data.get("y_window"))
+        if y_lo:
+            y_min_entry.insert(0, y_lo)
+        if y_hi:
+            y_max_entry.insert(0, y_hi)
+        style_entries["y_window_min"] = y_min_entry
+        style_entries["y_window_max"] = y_max_entry
+
+        ttkb.Label(style_tab, text="X axis ticks").grid(row=2, column=0, sticky="w", padx=5, pady=6)
+        x_ticks_entry = ttkb.Entry(style_tab)
+        x_ticks_entry.grid(row=2, column=1, columnspan=3, sticky="ew", padx=5, pady=6)
+        x_ticks_entry.insert(0, _format_ticks_value(style_data.get("x_ticks")))
+        style_entries["x_ticks"] = x_ticks_entry
+
+        ttkb.Label(style_tab, text="Y axis ticks").grid(row=3, column=0, sticky="w", padx=5, pady=6)
+        y_ticks_entry = ttkb.Entry(style_tab)
+        y_ticks_entry.grid(row=3, column=1, columnspan=3, sticky="ew", padx=5, pady=6)
+        y_ticks_entry.insert(0, _format_ticks_value(style_data.get("y_ticks")))
+        style_entries["y_ticks"] = y_ticks_entry
+
+        ttkb.Label(
+            style_tab,
+            text="Leave fields blank for automatic ranges/ticks. Use '*' for defaults or JSON lists for custom ticks.",
+            wraplength=480,
+            bootstyle="info",
+        ).grid(row=4, column=0, columnspan=4, sticky="w", padx=5, pady=(6, 0))
 
         # Datasets tab -------------------------------------------------
         dataset_frame = ttkb.Frame(datasets_tab)
@@ -873,7 +1985,52 @@ class PlotinatorApp(ttkb.Window):
             payload["datasets"] = copy.deepcopy(dataset_list)
             if data.get("parameters"):
                 payload["parameters"] = copy.deepcopy(data.get("parameters"))
-            style_overrides = copy.deepcopy(data.get("style", {}))
+            style_overrides = copy.deepcopy(style_data)
+
+            def _parse_window(min_key: str, max_key: str, dest_key: str) -> None:
+                min_text = style_entries[min_key].get().strip()
+                max_text = style_entries[max_key].get().strip()
+
+                def _convert(value: str) -> float | None:
+                    if not value or value == "*":
+                        return None
+                    try:
+                        return float(value)
+                    except ValueError:
+                        return None
+
+                if not min_text and not max_text:
+                    style_overrides.pop(dest_key, None)
+                    return
+
+                lo_value = _convert(min_text)
+                hi_value = _convert(max_text)
+                if lo_value is None and hi_value is None:
+                    style_overrides.pop(dest_key, None)
+                else:
+                    style_overrides[dest_key] = [lo_value, hi_value]
+
+            def _parse_ticks(entry_key: str, dest_key: str) -> None:
+                text = style_entries[entry_key].get().strip()
+                if not text:
+                    style_overrides.pop(dest_key, None)
+                    return
+                if text.startswith("[") or text.startswith("{"):
+                    try:
+                        style_overrides[dest_key] = json.loads(text)
+                        return
+                    except json.JSONDecodeError:
+                        pass
+                try:
+                    style_overrides[dest_key] = float(text)
+                except ValueError:
+                    style_overrides[dest_key] = text
+
+            _parse_window("x_window_min", "x_window_max", "x_window")
+            _parse_window("y_window_min", "y_window_max", "y_window")
+            _parse_ticks("x_ticks", "x_ticks")
+            _parse_ticks("y_ticks", "y_ticks")
+
             if payload["color"]:
                 style_overrides.setdefault("line_color", payload["color"])
             if style_overrides:
