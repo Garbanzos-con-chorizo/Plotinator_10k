@@ -248,7 +248,7 @@ class PlotinatorApp(ttkb.Window):
             ("new", "New Project", self.new_project_dialog, "secondary-outline"),
             ("open", "Open Project", self.open_project_dialog, "secondary-outline"),
             ("save", "Save Project", lambda: self.save_project(), "secondary"),
-            ("save_as", "Save As…", self.save_project_as, "secondary-outline"),
+            ("save_as", "Save As…", self.save_project_as_dialog, "secondary-outline"),
             ("add_fit", "Add Fit", self.add_fit, "primary"),
             ("delete_fit", "Delete Fit", self.delete_fit, "danger-outline"),
             ("run", "Run Batch", self.run_batch, "success"),
@@ -395,7 +395,7 @@ class PlotinatorApp(ttkb.Window):
         file_menu.add_separator()
         file_menu.add_command(label="Save Project", command=lambda: self.save_project())
         self._menu_entries["save"] = (file_menu, file_menu.index("end"))
-        file_menu.add_command(label="Save Project As…", command=self.save_project_as)
+        file_menu.add_command(label="Save Project As…", command=self.save_project_as_dialog)
         self._menu_entries["save_as"] = (file_menu, file_menu.index("end"))
         file_menu.add_separator()
         file_menu.add_command(label="Exit", command=self.destroy)
@@ -1507,7 +1507,7 @@ class PlotinatorApp(ttkb.Window):
             if project.paths.root.name == TEMP_PROJECT_FOLDER:
                 target_root = candidate if candidate.is_dir() else candidate.parent
                 try:
-                    project = self._project_manager.save_project_as(target_root)
+                    project = self._project_manager.save_project_as_dialog(target_root)
                 except Exception as exc:  # noqa: BLE001 - surfaced to UI
                     self.show_toast("Project migration failed", level="error")
                     messagebox.showerror(
@@ -1573,7 +1573,7 @@ class PlotinatorApp(ttkb.Window):
         if project.paths.root.name == TEMP_PROJECT_FOLDER:
             target_root = target if target.is_dir() else target.parent
             try:
-                project = self._project_manager.save_project_as(target_root)
+                project = self._project_manager.save_project_as_dialog(target_root)
             except Exception as exc:  # noqa: BLE001 - surfaced to UI
                 self.show_toast("Project migration failed", level="error")
                 messagebox.showerror(
@@ -1737,7 +1737,7 @@ class PlotinatorApp(ttkb.Window):
             return
 
         try:
-            new_project = self._project_manager.save_project_as(target_path)
+            new_project = self._project_manager.save_project_as_dialog(target_path)
         except FileExistsError as exc:
             self.show_toast("Destination already exists", level="warning")
             messagebox.showerror("Plotinator", str(exc), parent=self)
