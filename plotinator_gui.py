@@ -307,8 +307,9 @@ class PlotinatorApp(ttkb.Window):
         self._log_filter_var.trace_add("write", self._queue_log_filter_update)
         self.log_text.bind("<Control-f>", self._focus_log_filter)
 
-        queue_paned.paneconfigure(table_frame, weight=3)
-        queue_paned.paneconfigure(log_frame, weight=2)
+        queue_paned.pane(table_frame, weight=3)
+        queue_paned.pane(log_frame, weight=2)
+
 
         self._preview_container = self._build_preview_container(content_paned)
 
