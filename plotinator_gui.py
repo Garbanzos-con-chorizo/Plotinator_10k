@@ -404,6 +404,262 @@ class PlotinatorApp(ttkb.Window):
         self._open_fit_editor(fit, index)
 
     # ------------------------------------------------------------------
+    def run_batch(self) -> None:
+        worker = self._worker
+        if worker and worker.is_running():
+            info_message = "Batch already running."
+            self._append_log(f"[WARN] {info_message}\n")
+            self.show_toast(info_message, level="warning")
+            return
+
+        self.save_config()
+        self.progress.configure(value=0)
+        self.log_text.delete("1.0", tk.END)
+        self._progress_total = 0
+        self._progress_completed = 0
+        self._worker = BatchWorker(self.config_path)
+        self._event_queue = self._worker.start()
+        self._set_status("Launching batch…")
+        self.after(100, self._poll_events)
+
+
+    def _poll_events(self) -> None:
+        if self._event_queue is None or self._worker is None:
+            return
+
+        try:
+            event = self._event_queue.get_nowait()
+        except queue.Empty:
+            event = None
+        else:
+            self._handle_engine_event(event)
+
+        if self._event_queue is None:
+            return
+
+        if event is not None and not self._event_queue.empty():
+            self.after(0, self._poll_events)
+            return
+
+        if (not self._worker.is_running()) and self._event_queue.empty():
+            self._worker = None
+            self._event_queue = None
+            return
+
+        self.after(100, self._poll_events)
+
+    # ------------------------------------------------------------------
+    def _stop_runner_thread(self) -> None:
+        """Request cancellation of the in-process engine runner and drain events."""
+
+        worker = self._worker
+        if worker is not None:
+            worker.stop()
+        self._worker = None
+        queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
+        self._event_queue = None
+        if queued_events is not None:
+            try:
+                while True:
+                    event = queued_events.get_nowait()
+                    self._handle_engine_event(event)
+            except queue.Empty:
+                pass
+
+    # ------------------------------------------------------------------
+    def stop_batch(self) -> None:
+        """Public helper for stop controls to shut down the batch thread."""
+        worker = self._worker
+        if worker is None or not worker.is_running():
+            self.show_toast("No batch is currently running", level="info")
+            return
+        self._stop_runner_thread()
+
+    # ------------------------------------------------------------------
+    def _handle_engine_event(self, event: dict[str, Any]) -> None:
+        etype = event.get("type")
+        if etype == "log":
+            message = event.get("message", "")
+            if message and not message.endswith("\n"):
+                message += "\n"
+            if message:
+                self._append_log(message)
+            return
+
+        if etype == "job-start":
+            total = int(event.get("total") or 0)
+            self._progress_total = max(total, 0)
+            self._progress_completed = 0
+            self.progress.configure(value=0)
+            ts = event.get("timestamp", "")
+            self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
+            self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
+            return
+
+        if etype == "plot-start":
+            title = event.get("title", "Untitled")
+            self._append_log(f"[RUN] Processing: {title}\n")
+            self._set_status(f"Processing plot: {title}")
+            return
+
+        if etype == "plot-complete":
+            self._progress_completed += 1
+            self._update_progress_bar()
+            title = event.get("title", "Untitled")
+            self._append_log(f"[OK] Finished: {title}\n")
+            total_display = self._progress_total if self._progress_total else "?"
+            self._set_status(
+                f"Completed {self._progress_completed}/{total_display}: {title}"
+            )
+            return
+
+        if etype == "plot-error":
+            self._progress_completed += 1
+            self._update_progress_bar()
+            title = event.get("title", "Untitled")
+            error_msg = event.get("error", "Unknown error")
+            self._append_log(f"[X] Error in {title}: {error_msg}\n")
+            self.show_toast(f"Plot failed: {title}", level="error")
+            self._set_status(f"Plot error: {title}")
+            return
+
+        if etype == "report-markdown-ready":
+            md_path = event.get("markdown_path", "")
+            if md_path:
+                self._append_log(f"[REPORT] Markdown saved to: {md_path}\n")
+            self._set_status("Report markdown generated")
+            return
+
+        if etype == "report-exported":
+            pdf_path = event.get("pdf_path", "")
+            if pdf_path:
+                self._append_log(f"[REPORT] PDF exported to: {pdf_path}\n")
+            self.show_toast("Report exported", level="success")
+            self._set_status("Report exported")
+            return
+
+        if etype == "report-error":
+            stage = event.get("stage", "report")
+            error_msg = event.get("error", "Unknown error")
+            self._append_log(f"[WARN] Report {stage} failed: {error_msg}\n")
+            self.show_toast("Report generation issue", level="warning")
+            self._set_status(f"Report {stage} failed")
+            return
+
+        if etype == "job-complete":
+            self._progress_completed = self._progress_total or self._progress_completed
+            self.progress.configure(value=100)
+            results_path = event.get("results_path")
+            if results_path:
+                self._append_log(f"\n[COMPLETE] Results saved to: {results_path}\n")
+            pdf_path = event.get("pdf_path")
+            if pdf_path:
+                self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
+            self.show_toast("Batch complete", level="success")
+            self._set_status("Batch complete")
+            self._event_queue = None
+            self._worker = None
+            return
+
+        if etype == "job-error":
+            error_msg = event.get("error", "Batch failed")
+            self._append_log(f"[X] {error_msg}\n")
+            self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status(f"Batch failed: {error_msg}")
+            self._event_queue = None
+            self._worker = None
+            return
+
+        if etype == "job-exception":
+            error_msg = event.get("error", "Batch failed")
+            self._append_log(f"[X] {error_msg}\n")
+            self.show_toast(error_msg, level="error")
+            messagebox.showerror("Plotinator", error_msg)
+            self._set_status(f"Batch failed: {error_msg}")
+            self._event_queue = None
+            self._worker = None
+            return
+
+        if etype == "job-cancelled":
+            self._append_log("[CANCELLED] Batch cancelled by user.\n")
+            self.show_toast("Batch cancelled", level="warning")
+            self._set_status("Batch cancelled")
+            self._event_queue = None
+            self._worker = None
+            return
+
+    # ------------------------------------------------------------------
+    def _update_progress_bar(self) -> None:
+        if self._progress_total:
+            percent = (self._progress_completed / self._progress_total) * 100
+        else:
+            percent = 0.0
+        self.progress.configure(value=min(percent, 100))
+
+    # ------------------------------------------------------------------
+    def _set_status(self, text: str) -> None:
+        def _apply() -> None:
+            self.status_var.set(text)
+
+        self.after(0, _apply)
+
+    # ------------------------------------------------------------------
+    def _append_log(self, text: str) -> None:
+        def _write() -> None:
+            self.log_text.insert(tk.END, text)
+            self.log_text.see(tk.END)
+
+        self.after(0, _write)
+
+    # ------------------------------------------------------------------
+    def open_latest_report(self) -> None:
+        outputs = Path("outputs")
+        if not outputs.exists():
+            info_message = "Outputs folder not found yet. Run a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
+            return
+
+        latest = max(
+            outputs.glob("*/fit_results.json"),
+            default=None,
+            key=lambda p: p.stat().st_mtime,
+        )
+        if not latest:
+            info_message = "No reports available yet. Generate a batch first."
+            self._append_log(f"[REPORT] {info_message}\n")
+            self.show_toast(info_message, level="info")
+            return
+
+        latest_dir = latest.parent
+        pdf_report = latest_dir / "report.pdf"
+        md_report = latest_dir / "report.md"
+        webbrowser = __import__("webbrowser")
+
+        try:
+            if pdf_report.exists():
+                webbrowser.open(pdf_report.resolve().as_uri())
+            elif md_report.exists():
+                webbrowser.open(md_report.resolve().as_uri())
+            else:
+                webbrowser.open(latest_dir.resolve().as_uri())
+        except Exception as exc:
+            self._append_log(f"[REPORT] Could not open report: {exc}\n")
+            self.show_toast("Could not open report", level="error")
+
+    # ------------------------------------------------------------------
+    def show_toast(self, message: str, level: str = "info") -> None:
+        _show_toast(self, message, level)
+
+    # ------------------------------------------------------------------
+    def destroy(self) -> None:  # type: ignore[override]
+        stop_runner = getattr(self, "_stop_runner_thread", None)
+        if callable(stop_runner):
+            stop_runner()
+        super().destroy()
+
+    # ------------------------------------------------------------------
     def _open_fit_editor(
         self,
         fit: FitConfig | dict | None = None,
@@ -938,257 +1194,7 @@ class DatasetDialog(ttkb.Toplevel):
 
         self.result = payload
         self.destroy()
-
-    # ------------------------------------------------------------------
-    def run_batch(self) -> None:
-        worker = self._worker
-        if worker and worker.is_running():
-            info_message = "Batch already running."
-            self._append_log(f"[WARN] {info_message}\n")
-            self.show_toast(info_message, level="warning")
-            return
-
-        self.save_config()
-        self.progress.configure(value=0)
-        self.log_text.delete("1.0", tk.END)
-        self._progress_total = 0
-        self._progress_completed = 0
-        self._worker = BatchWorker(self.config_path)
-        self._event_queue = self._worker.start()
-        self._set_status("Launching batch…")
-        self.after(100, self._poll_events)
-
-    # ------------------------------------------------------------------
-    def _poll_events(self) -> None:
-        if self._event_queue is None or self._worker is None:
-            return
-
-        try:
-            event = self._event_queue.get_nowait()
-        except queue.Empty:
-            event = None
-        else:
-            self._handle_engine_event(event)
-
-        if self._event_queue is None:
-            return
-
-        if event is not None and not self._event_queue.empty():
-            self.after(0, self._poll_events)
-            return
-
-        if (not self._worker.is_running()) and self._event_queue.empty():
-            self._worker = None
-            self._event_queue = None
-            return
-
-        self.after(100, self._poll_events)
-
-    # ------------------------------------------------------------------
-    def _stop_runner_thread(self) -> None:
-        """Request cancellation of the in-process engine runner and drain events."""
-
-        worker = self._worker
-        if worker is not None:
-            worker.stop()
-        self._worker = None
-        queued_events: queue.Queue[dict[str, Any]] | None = self._event_queue
-        self._event_queue = None
-        if queued_events is not None:
-            try:
-                while True:
-                    event = queued_events.get_nowait()
-                    self._handle_engine_event(event)
-            except queue.Empty:
-                pass
-
-    # ------------------------------------------------------------------
-    def stop_batch(self) -> None:
-        """Public helper for stop controls to shut down the batch thread."""
-        worker = self._worker
-        if worker is None or not worker.is_running():
-            self.show_toast("No batch is currently running", level="info")
-            return
-        self._stop_runner_thread()
-
-    # ------------------------------------------------------------------
-    def _handle_engine_event(self, event: dict[str, Any]) -> None:
-        etype = event.get("type")
-        if etype == "log":
-            message = event.get("message", "")
-            if message and not message.endswith("\n"):
-                message += "\n"
-            if message:
-                self._append_log(message)
-            return
-
-        if etype == "job-start":
-            total = int(event.get("total") or 0)
-            self._progress_total = max(total, 0)
-            self._progress_completed = 0
-            self.progress.configure(value=0)
-            ts = event.get("timestamp", "")
-            self._append_log(f"[RUN] Starting batch at {ts} ({total} plots)\n")
-            self._set_status(f"Batch started • 0/{self._progress_total or 0} complete")
-            return
-
-        if etype == "plot-start":
-            title = event.get("title", "Untitled")
-            self._append_log(f"[RUN] Processing: {title}\n")
-            self._set_status(f"Processing plot: {title}")
-            return
-
-        if etype == "plot-complete":
-            self._progress_completed += 1
-            self._update_progress_bar()
-            title = event.get("title", "Untitled")
-            self._append_log(f"[OK] Finished: {title}\n")
-            total_display = self._progress_total if self._progress_total else "?"
-            self._set_status(
-                f"Completed {self._progress_completed}/{total_display}: {title}"
-            )
-            return
-
-        if etype == "plot-error":
-            self._progress_completed += 1
-            self._update_progress_bar()
-            title = event.get("title", "Untitled")
-            error_msg = event.get("error", "Unknown error")
-            self._append_log(f"[X] Error in {title}: {error_msg}\n")
-            self.show_toast(f"Plot failed: {title}", level="error")
-            self._set_status(f"Plot error: {title}")
-            return
-
-        if etype == "report-markdown-ready":
-            md_path = event.get("markdown_path", "")
-            if md_path:
-                self._append_log(f"[REPORT] Markdown saved to: {md_path}\n")
-            self._set_status("Report markdown generated")
-            return
-
-        if etype == "report-exported":
-            pdf_path = event.get("pdf_path", "")
-            if pdf_path:
-                self._append_log(f"[REPORT] PDF exported to: {pdf_path}\n")
-            self.show_toast("Report exported", level="success")
-            self._set_status("Report exported")
-            return
-
-        if etype == "report-error":
-            stage = event.get("stage", "report")
-            error_msg = event.get("error", "Unknown error")
-            self._append_log(f"[WARN] Report {stage} failed: {error_msg}\n")
-            self.show_toast("Report generation issue", level="warning")
-            self._set_status(f"Report {stage} failed")
-            return
-
-        if etype == "job-complete":
-            self._progress_completed = self._progress_total or self._progress_completed
-            self.progress.configure(value=100)
-            results_path = event.get("results_path")
-            if results_path:
-                self._append_log(f"\n[COMPLETE] Results saved to: {results_path}\n")
-            pdf_path = event.get("pdf_path")
-            if pdf_path:
-                self._append_log(f"[REPORT] Latest PDF: {pdf_path}\n")
-            self.show_toast("Batch complete", level="success")
-            self._set_status("Batch complete")
-            self._event_queue = None
-            self._worker = None
-            return
-
-        if etype == "job-error":
-            error_msg = event.get("error", "Batch failed")
-            self._append_log(f"[X] {error_msg}\n")
-            self.show_toast(error_msg, level="error")
-            messagebox.showerror("Plotinator", error_msg)
-            self._set_status(f"Batch failed: {error_msg}")
-            self._event_queue = None
-            self._worker = None
-            return
-
-        if etype == "job-exception":
-            error_msg = event.get("error", "Batch failed")
-            self._append_log(f"[X] {error_msg}\n")
-            self.show_toast(error_msg, level="error")
-            messagebox.showerror("Plotinator", error_msg)
-            self._set_status(f"Batch failed: {error_msg}")
-            self._event_queue = None
-            self._worker = None
-            return
-
-        if etype == "job-cancelled":
-            self._append_log("[CANCELLED] Batch cancelled by user.\n")
-            self.show_toast("Batch cancelled", level="warning")
-            self._set_status("Batch cancelled")
-            self._event_queue = None
-            self._worker = None
-            return
-
-    # ------------------------------------------------------------------
-    def _update_progress_bar(self) -> None:
-        if self._progress_total:
-            percent = (self._progress_completed / self._progress_total) * 100
-        else:
-            percent = 0.0
-        self.progress.configure(value=min(percent, 100))
-
-    # ------------------------------------------------------------------
-    def _set_status(self, text: str) -> None:
-        def _apply() -> None:
-            self.status_var.set(text)
-
-        self.after(0, _apply)
-
-    # ------------------------------------------------------------------
-    def _append_log(self, text: str) -> None:
-        def _write() -> None:
-            self.log_text.insert(tk.END, text)
-            self.log_text.see(tk.END)
-
-        self.after(0, _write)
-
-    # ------------------------------------------------------------------
-    def open_latest_report(self) -> None:
-        outputs = Path("outputs")
-        if not outputs.exists():
-            info_message = "Outputs folder not found yet. Run a batch first."
-            self._append_log(f"[REPORT] {info_message}\n")
-            self.show_toast(info_message, level="info")
-            return
-        latest = max(
-            outputs.glob("*/fit_results.json"),
-            default=None,
-            key=lambda p: p.stat().st_mtime,
-        )
-        if not latest:
-            info_message = "No reports available yet. Generate a batch first."
-            self._append_log(f"[REPORT] {info_message}\n")
-            self.show_toast(info_message, level="info")
-            return
-        latest_dir = latest.parent
-        pdf_report = latest_dir / "report.pdf"
-        md_report = latest_dir / "report.md"
-        webbrowser = __import__("webbrowser")
-        if pdf_report.exists():
-            webbrowser.open(pdf_report.as_uri())
-        elif md_report.exists():
-            webbrowser.open(md_report.as_uri())
-        else:
-            webbrowser.open(latest_dir.as_uri())
-
-    # ------------------------------------------------------------------
-    def show_toast(self, message: str, level: str = "info") -> None:
-        _show_toast(self, message, level)
-
-    # ------------------------------------------------------------------
-    def destroy(self) -> None:  # type: ignore[override]
-        stop_runner = getattr(self, "_stop_runner_thread", None)
-        if callable(stop_runner):
-            stop_runner()
-        super().destroy()
-
-
+   
 def main() -> int:
     app = PlotinatorApp()
     app.mainloop()

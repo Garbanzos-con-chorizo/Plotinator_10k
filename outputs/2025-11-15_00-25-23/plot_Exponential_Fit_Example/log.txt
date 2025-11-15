@@ -1,0 +1,36 @@
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_Exponential_Fit_Example\temp_plot.plt" line 20: warning: 
+	> Implied independent variable y not found in fit function.
+	> Assuming version 4 syntax with zerror in column 3 but no zerror keyword.
+
+iter      chisq       delta/lim  lambda   A             B            
+   0 1.4595395497e+236  0.00e+00  1.17e+120   2.670000e+01   5.340000e+01
+   1 2.9875705393e+235 -3.89e+05  1.17e+119   2.669974e+01   5.324138e+01
+iter      chisq       delta/lim  lambda   A             B            
+
+The maximum lambda = 1.000000e+20 was exceeded. Fit stopped.
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_Exponential_Fit_Example\temp_plot.plt" line 20: warning: Igamma: overflow
+final sum of squares of residuals : 2.98757e+235
+rel. change during last iteration : -3.88537
+
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_Exponential_Fit_Example\temp_plot.plt" line 20: warning: Igamma: overflow
+degrees of freedom    (FIT_NDF)                        : 3
+rms of residuals      (FIT_STDFIT) = sqrt(WSSR/ndf)    : 3.15572e+117
+variance of residuals (reduced chisquare) = WSSR/ndf   : 9.95857e+234
+p-value of the Chisq distribution (FIT_P)              : 2
+
+Final set of parameters            Asymptotic Standard Error
+=======================            ==========================
+A               = 26.6997          +/- 3.939e+24    (1.475e+25%)
+B               = 53.2414          +/- 2.575e+22    (4.837e+22%)
+
+correlation matrix of the fit parameters:
+                A      B      
+A               1.000 
+B              -1.000  1.000 
+PYFIT A 26.69974084697295 3.939186297789768e+24
+PYFIT B 53.24137738386725 2.575382680262611e+22
+
+plot NaN notitle
+                ^
+"C:\Projects\Plotinator_10k\outputs\2025-11-15_00-25-23\plot_Exponential_Fit_Example\temp_plot.plt" line 53: all points y value undefined!
+

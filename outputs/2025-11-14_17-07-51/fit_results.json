@@ -1,0 +1,119 @@
+{
+  "timestamp": "2025-11-14_17-07-51",
+  "results": [
+    {
+      "title": "Exponential Fit Example",
+      "formula": "A * exp(B * x)",
+      "parameters": {
+        "A": {
+          "value": 26.69974084697295,
+          "error": 3.939186297789768e+24
+        },
+        "B": {
+          "value": 53.24137738386725,
+          "error": 2.575382680262611e+22
+        }
+      },
+      "metrics": null,
+      "datafile": "C:/Projects/Plotinator_10k/outputs/2025-11-14_17-07-51/plot_Exponential_Fit_Example/dataset_1/preprocessed.dat",
+      "output_plot": "C:/Projects/Plotinator_10k/outputs/2025-11-14_17-07-51/plot_Exponential_Fit_Example/plot.png",
+      "residuals_plot": null,
+      "data_source": {
+        "path": "C:/Projects/Plotinator_10k/data/sample2.dat",
+        "columns": {
+          "x": 1,
+          "y": 2,
+          "weight": 4
+        },
+        "rows_before": 5,
+        "rows_after": 5,
+        "preprocessing": [
+          {
+            "type": "filter",
+            "expression": "col2 > 0",
+            "retained_rows": 5
+          }
+        ]
+      },
+      "layout": {
+        "rows": 2,
+        "columns": 1,
+        "shared_x": false,
+        "shared_y": true,
+        "show_legend": false
+      },
+      "datasets": [
+        {
+          "label": "Growth Curve",
+          "pane": "upper",
+          "pane_index": null,
+          "columns": {
+            "x": 1,
+            "y": 2,
+            "weight": 4
+          },
+          "style": {
+            "x_label": "X",
+            "x_unit": "",
+            "x_scale": "linear",
+            "x_tick_format": "",
+            "y_label": "Y",
+            "y_unit": "",
+            "y_scale": "linear",
+            "y_tick_format": "",
+            "grid": true,
+            "grid_layer": "back",
+            "legend_visible": true,
+            "legend_position": "top right",
+            "font_family": "Segoe UI",
+            "font_size": 11,
+            "title_font_size": 16,
+            "axis_label_font_size": 13,
+            "tick_font_size": 11,
+            "line_color": "red",
+            "line_width": 2.0,
+            "point_type": 7
+          },
+          "data_source": {
+            "path": "C:/Projects/Plotinator_10k/data/sample2.dat",
+            "columns": {
+              "x": 1,
+              "y": 2,
+              "weight": 4
+            },
+            "preprocessing": [
+              {
+                "type": "filter",
+                "expression": "col2 > 0"
+              }
+            ]
+          },
+          "prepared_data": {
+            "path": "C:/Projects/Plotinator_10k/outputs/2025-11-14_17-07-51/plot_Exponential_Fit_Example/dataset_1/preprocessed.dat",
+            "rows_before": 5,
+            "rows_after": 5,
+            "applied_steps": [
+              {
+                "type": "filter",
+                "expression": "col2 > 0",
+                "retained_rows": 5
+              }
+            ]
+          }
+        }
+      ],
+      "canvases": {
+        "combined": "C:/Projects/Plotinator_10k/outputs/2025-11-14_17-07-51/plot_Exponential_Fit_Example/plot.png",
+        "residuals": null
+      },
+      "confidence_notes": "Fit weighted by column 4"
+    }
+  ],
+  "errors": [
+    {
+      "title": "Linear Fit Example",
+      "error": "name 'a' is not defined",
+      "traceback": "Traceback (most recent call last):\n  File \"C:\\Projects\\Plotinator_10k\\engine\\runner.py\", line 301, in run_job\n    result = future.result()\n             ^^^^^^^^^^^^^^^\n  File \"C:\\Python311\\Lib\\concurrent\\futures\\_base.py\", line 449, in result\n    return self.__get_result()\n           ^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Python311\\Lib\\concurrent\\futures\\_base.py\", line 401, in __get_result\n    raise self._exception\n  File \"C:\\Python311\\Lib\\concurrent\\futures\\thread.py\", line 58, in run\n    result = self.fn(*self.args, **self.kwargs)\n             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\engine\\runner.py\", line 202, in process_plot\n    metrics = compute_residual_metrics(\n              ^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\engine\\script_builder.py\", line 92, in compute_residual_metrics\n    yfit = f(x)\n           ^^^^\n  File \"C:\\Projects\\Plotinator_10k\\venv1\\Lib\\site-packages\\numpy\\lib\\_function_base_impl.py\", line 2544, in __call__\n    return self._call_as_normal(*args, **kwargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\venv1\\Lib\\site-packages\\numpy\\lib\\_function_base_impl.py\", line 2537, in _call_as_normal\n    return self._vectorize_call(func=func, args=vargs)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\venv1\\Lib\\site-packages\\numpy\\lib\\_function_base_impl.py\", line 2622, in _vectorize_call\n    ufunc, otypes = self._get_ufunc_and_otypes(func=func, args=args)\n                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\venv1\\Lib\\site-packages\\numpy\\lib\\_function_base_impl.py\", line 2582, in _get_ufunc_and_otypes\n    outputs = func(*inputs)\n              ^^^^^^^^^^^^^\n  File \"C:\\Projects\\Plotinator_10k\\engine\\script_builder.py\", line 91, in <lambda>\n    f = np.vectorize(lambda xx: eval(expr, {\"x\": xx, \"math\": math, \"np\": np}))\n                                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"<string>\", line 1, in <module>\nNameError: name 'a' is not defined\n"
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+"C:\Projects\Plotinator_10k\outputs\2025-11-14_17-07-51\plot_Linear_Fit_Example\temp_plot.plt" line 20: warning: 
+	> Implied independent variable y not found in fit function.
+	> Assuming version 4 syntax with zerror in column 3 but no zerror keyword.
+
+iter      chisq       delta/lim  lambda   a             b            
+   0 2.6790000000e+05   0.00e+00  1.55e+02    5.000000e+00   1.000000e+01
+   1 3.6554892817e+03  -7.23e+06  1.55e+01    1.351283e+00   4.476195e+00
+   2 1.2227245332e+00  -2.99e+08  1.55e+00    1.975625e+00   1.027757e-01
+   3 7.8632383491e-08  -1.55e+12  1.55e-01    1.999994e+00   2.600551e-05
+   4 5.0559662764e-19  -1.56e+16  1.55e-02    2.000000e+00   6.598246e-11
+   5 4.0253407556e-23  -1.26e+09  1.55e-03    2.000000e+00  -2.581027e-13
+   6 5.7598876210e-24  -5.99e+05  1.55e-04    2.000000e+00  -1.550018e-13
+   7 3.4810706114e-24  -6.55e+04  1.55e-05    2.000000e+00  -7.077729e-14
+   8 4.8603692523e-25  -6.16e+05  1.55e-06    2.000000e+00  -6.445289e-14
+   9 3.8315467205e-25  -2.69e+04  1.55e-07    2.000000e+00  -4.992378e-14
+  10 2.5644388915e-25  -4.94e+04  1.55e-08    2.000000e+00  -4.676366e-14
+  11 2.5644388915e-25   0.00e+00  1.55e-09    2.000000e+00  -4.676366e-14
+"C:\Projects\Plotinator_10k\outputs\2025-11-14_17-07-51\plot_Linear_Fit_Example\temp_plot.plt" line 20: Singular matrix in Invert_RtR
+
+*** FIT ERROR ***
+PYFIT a 2.000000000000011 0
+PYFIT b -4.681042134289487e-14 0

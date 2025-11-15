@@ -1,81 +1,121 @@
 {
-    "fits": [
+  "fits": [
+    {
+      "title": "Linear Fit Example",
+      "formula": "a*x + b",
+      "residuals": true,
+      "layout": {
+        "rows": 1,
+        "columns": 2,
+        "shared_x": true,
+        "shared_y": false,
+        "show_legend": true
+      },
+      "datasets": [
         {
-            "title": "Linear Fit Example",
-            "formula": "a*x + b",
-            "residuals": true,
-            "color": "blue",
-            "layout": {
-                "rows": 1,
-                "columns": 2,
-                "shared_x": true,
-                "shared_y": false,
-                "show_legend": true
+          "label": "Sample 1 (raw)",
+          "data_source": {
+            "path": "data\\sample1.dat",
+            "columns": {
+              "x": 1,
+              "y": 2,
+              "error": 3
             },
-            "datasets": [
-                {
-                    "label": "Sample 1 (raw)",
-                    "pane_index": 1,
-                    "data_source": {
-                        "path": "data/sample1.dat",
-                        "columns": {"x": 1, "y": 2, "error": 3},
-                        "preprocessing": []
-                    }
-                },
-                {
-                    "label": "Sample 1 (filtered)",
-                    "pane_index": 2,
-                    "style": {"line_color": "#ff7f0e"},
-                    "data_source": {
-                        "path": "data/sample1.dat",
-                        "columns": {"x": 1, "y": 2},
-                        "preprocessing": [
-                            {"type": "filter", "expression": "col2 > 0"}
-                        ]
-                    }
-                }
-            ]
+            "preprocessing": []
+          },
+          "pane_index": 1
         },
         {
-            "title": "Exponential Fit Example",
-            "formula": "A * exp(B * x)",
-            "residuals": false,
-            "color": "red",
-            "layout": {
-                "rows": 2,
-                "columns": 1,
-                "shared_x": false,
-                "shared_y": true,
-                "show_legend": false
+          "label": "Sample 1 (filtered)",
+          "data_source": {
+            "path": "data\\sample1.dat",
+            "columns": {
+              "x": 1,
+              "y": 2
             },
-            "datasets": [
-                {
-                    "label": "Growth Curve",
-                    "pane": "upper",
-                    "data_source": {
-                        "path": "data/sample2.dat",
-                        "columns": {"x": 1, "y": 2, "weight": 4},
-                        "preprocessing": [
-                            {"type": "filter", "expression": "col2 > 0"}
-                        ]
-                    }
-                }
+            "preprocessing": [
+              {
+                "type": "filter",
+                "expression": "col2 > 0"
+              }
             ]
-        },
-        {
-            "title": "New Fit",
-            "formula": "a*x + b",
-            "residuals": true,
-            "color": "#1f77b4",
-            "parameters": {
-                "a": 1.0,
-                "b": 1.0
-            },
-            "data_source": {
-                "path": "data/sample3.dat",
-                "columns": {"x": 1, "y": 2},
-                "preprocessing": []
-            }
+          },
+          "pane_index": 2,
+          "style": {
+            "line_color": "#ff7f0e"
+          }
         }
-    ]
+      ],
+      "style": {
+        "line_color": "blue"
+      },
+      "color": "blue"
+    },
+    {
+      "title": "Exponential Fit Example",
+      "formula": "A * exp(B * x)",
+      "residuals": false,
+      "layout": {
+        "rows": 2,
+        "columns": 1,
+        "shared_x": false,
+        "shared_y": true,
+        "show_legend": false
+      },
+      "datasets": [
+        {
+          "label": "Growth Curve",
+          "data_source": {
+            "path": "data\\sample2.dat",
+            "columns": {
+              "x": 1,
+              "y": 2,
+              "weight": 4
+            },
+            "preprocessing": [
+              {
+                "type": "filter",
+                "expression": "col2 > 0"
+              }
+            ]
+          },
+          "pane": "upper"
+        }
+      ],
+      "style": {
+        "line_color": "red"
+      },
+      "color": "red"
+    },
+    {
+      "title": "general",
+      "formula": "ax^2+bx+c",
+      "residuals": true,
+      "layout": {
+        "rows": 1,
+        "columns": 1,
+        "shared_x": false,
+        "shared_y": false,
+        "show_legend": true
+      },
+      "datasets": [
+        {
+          "label": "Dataset",
+          "data_source": {
+            "path": "data\\sample3.dat",
+            "columns": {
+              "x": 1,
+              "y": 2
+            },
+            "preprocessing": []
+          },
+          "pane_index": 1
+        }
+      ],
+      "style": {
+        "line_color": "#1f77b4"
+      },
+      "color": "#1f77b4"
+    }
+  ]
 }
