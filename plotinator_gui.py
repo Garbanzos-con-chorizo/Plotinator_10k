@@ -11,7 +11,7 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 from typing import Any, Callable, Sequence
 
 import ttkbootstrap as ttkb
@@ -19,6 +19,8 @@ import ttkbootstrap as ttkb
 from config import ConfigError, FitConfig, PlotinatorConfig, load_config, load_config_file
 from engine import run_batch as engine_run_batch
 from plotinator import __version__ as PACKAGE_VERSION
+from plotinator.project import ProjectManager, PlotinatorProject, TEMP_PROJECT_FOLDER
+from plotinator.ui.workspace import WorkspaceState
 from plotinator.update_checker import ReleaseInfo, UpdateChecker, UpdateResult
 
 CONFIG_PATH = "config.json"
@@ -132,6 +134,15 @@ class PlotinatorApp(ttkb.Window):
         self.folder: Path | None = None
         self.config_path = Path(CONFIG_PATH).resolve()
         self.job: PlotinatorConfig = PlotinatorConfig(base_path=self.config_path.parent, fits=[])
+        self._project_manager = ProjectManager()
+        self._project: PlotinatorProject | None = None
+        self._app_state = WorkspaceState.load()
+        self._autosave_after_id: str | None = None
+        self._autosave_in_progress = False
+        self._autosave_error_dialog: ttkb.Toplevel | None = None
+        self._autosave_last_error: str | None = None
+        self._autosave_error_message = tk.StringVar(self, value="")
+        self._recent_menu: tk.Menu | None = None
         self._worker: BatchWorker | None = None
         self._event_queue: queue.Queue[dict[str, Any]] | None = None
         self._progress_total = 0
@@ -172,9 +183,11 @@ class PlotinatorApp(ttkb.Window):
         self._configure_styles()
         self._load_images()
 
+        self._create_menus()
         self._create_widgets()
         self._hide_preview_pane()
         self.tree.bind("<Double-1>", self.on_double_click)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.load_config()
         self._update_checker.start(self, self._handle_update_result)
 
@@ -187,6 +200,28 @@ class PlotinatorApp(ttkb.Window):
             font=("Segoe UI", 11, "bold"),
             padding=(14, 10),
         )
+
+    # ------------------------------------------------------------------
+    def _create_menus(self) -> None:
+        menubar = tk.Menu(self)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="New Project…", command=self.new_project_dialog)
+        file_menu.add_command(label="Open Project…", command=self.open_project_dialog)
+
+        recent_menu = tk.Menu(file_menu, tearoff=False)
+        self._recent_menu = recent_menu
+        file_menu.add_cascade(label="Open Recent", menu=recent_menu)
+
+        file_menu.add_separator()
+        file_menu.add_command(label="Save", command=self.save_config)
+        file_menu.add_command(label="Save Project As…", command=self.save_project_as_dialog)
+
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", command=self._on_close)
+
+        menubar.add_cascade(label="File", menu=file_menu)
+        self.config(menu=menubar)
+        self._update_recent_projects_menu()
 
     # ------------------------------------------------------------------
     def _create_widgets(self) -> None:
@@ -204,7 +239,7 @@ class PlotinatorApp(ttkb.Window):
         toolbar = ttkb.Frame(self, padding=10)
         toolbar.pack(fill="x")
         button_plan: Sequence[tuple[str, Callable[[], None], str]] = [
-            ("Data Folder", self.select_folder, "secondary-outline"),
+            ("Open Project", self.open_project_dialog, "secondary-outline"),
             ("Add Fit", self.add_fit, "primary"),
             ("Delete Fit", self.delete_fit, "danger-outline"),
             ("Save Config", self.save_config, "secondary"),
@@ -387,6 +422,7 @@ class PlotinatorApp(ttkb.Window):
 
         enabled_var = tk.BooleanVar(value=self._update_checker.preferences.enabled)
         interval_var = tk.IntVar(value=self._update_checker.preferences.interval_hours)
+        autosave_var = tk.IntVar(value=self._app_state.autosave_minutes)
 
         ttkb.Label(window, text="Updates", font=("Segoe UI", 12, "bold")).pack(
             anchor="w", padx=12, pady=(12, 4)
@@ -408,6 +444,28 @@ class PlotinatorApp(ttkb.Window):
             textvariable=interval_var,
         )
         freq_spin.pack(side="left", padx=(10, 0))
+
+        ttkb.Separator(window, orient="horizontal").pack(fill="x", padx=12, pady=(6, 6))
+
+        ttkb.Label(window, text="Workspace", font=("Segoe UI", 12, "bold")).pack(
+            anchor="w", padx=12, pady=(0, 4)
+        )
+        autosave_frame = ttkb.Frame(window)
+        autosave_frame.pack(fill="x", padx=18, pady=(0, 12))
+        ttkb.Label(autosave_frame, text="Autosave every (minutes)").pack(side="left")
+        autosave_spin = ttkb.Spinbox(
+            autosave_frame,
+            from_=0,
+            to=120,
+            width=6,
+            textvariable=autosave_var,
+        )
+        autosave_spin.pack(side="left", padx=(10, 0))
+        ttkb.Label(
+            autosave_frame,
+            text="(0 disables autosave)",
+            bootstyle="secondary",
+        ).pack(side="left", padx=(8, 0))
 
         status_label = ttkb.Label(
             window,
@@ -435,6 +493,13 @@ class PlotinatorApp(ttkb.Window):
                 enabled=bool(enabled_var.get()),
                 interval_hours=interval_value,
             )
+            try:
+                autosave_value = int(autosave_var.get())
+            except (tk.TclError, ValueError):
+                autosave_value = self._app_state.autosave_minutes
+            self._app_state.autosave_minutes = max(0, autosave_value)
+            self._app_state.save()
+            self._schedule_autosave(reset=True)
             self._update_status_var.set(self._format_update_status())
             self.show_toast("Settings updated", level="success")
             _close()
@@ -1186,50 +1251,467 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def load_config(self) -> None:
-        if not self.config_path.exists():
-            base_dir = self.config_path.parent.resolve()
-            self.job = PlotinatorConfig(base_path=base_dir, fits=[])
-            self.folder = base_dir
-            self.save_config()
-            self.refresh_table()
-            self._refresh_available_data_files()
+        self._load_startup_project()
+
+    # ------------------------------------------------------------------
+    def _load_startup_project(self) -> None:
+        self._app_state.prune_missing()
+        self._app_state.save()
+
+        candidates: list[Path] = []
+        if self._app_state.last_opened is not None:
+            candidates.append(self._app_state.last_opened)
+        default_root = self.config_path.parent.resolve()
+        if default_root not in candidates:
+            candidates.append(default_root)
+
+        project: PlotinatorProject | None = None
+        for candidate in candidates:
+            try:
+                project = self._project_manager.open_project(candidate)
+            except FileNotFoundError:
+                continue
+            except Exception as exc:
+                self._append_log(f"[CONFIG] Failed to open project at {candidate}: {exc}\n")
+                continue
+
+            if project.paths.root.name == TEMP_PROJECT_FOLDER:
+                target_root = candidate if candidate.is_dir() else candidate.parent
+                try:
+                    project = self._project_manager.save_project_as(target_root)
+                except Exception as exc:  # noqa: BLE001 - surfaced to UI
+                    self.show_toast("Project migration failed", level="error")
+                    messagebox.showerror(
+                        "Plotinator",
+                        f"Unable to migrate legacy workspace to {target_root}:\n{exc}",
+                        parent=self,
+                    )
+                    continue
+
+            self._apply_project(project, record_state=True)
+            self._write_engine_config(project)
+            self._schedule_autosave(reset=True)
+            return
+
+        fallback_root = Path.home() / "Plotinator Projects" / "Untitled Project.p10k"
+        try:
+            project = self._project_manager.new_project(fallback_root)
+        except Exception:  # noqa: BLE001 - fallback to application directory
+            alt_root = default_root / "Untitled Project.p10k"
+            project = self._project_manager.new_project(alt_root)
+
+        self._apply_project(project, record_state=True)
+        self._write_engine_config(project)
+        self._schedule_autosave(reset=True)
+        self.show_toast("Created a new project", level="info")
+
+    # ------------------------------------------------------------------
+    def _apply_project(self, project: PlotinatorProject, *, record_state: bool) -> None:
+        self._project = project
+        self.config_path = project.paths.root / CONFIG_PATH
+        self.job = project.to_config()
+        self.folder = project.paths.data_dir
+        self.refresh_table()
+        self._refresh_available_data_files()
+        self._update_window_title(project)
+
+        if record_state:
+            self._app_state.record_project(project.paths.root)
+            self._app_state.save()
+            self._update_recent_projects_menu()
+
+        self._dismiss_autosave_error_dialog()
+
+    # ------------------------------------------------------------------
+    def _update_window_title(self, project: PlotinatorProject) -> None:
+        label = project.metadata.label or project.paths.root.name
+        self.title(f"Plotinator Open Beta v{PACKAGE_VERSION} — {label}")
+
+    # ------------------------------------------------------------------
+    def _open_project_path(self, path: Path, *, record_state: bool = True) -> None:
+        target = Path(path)
+        try:
+            project = self._project_manager.open_project(target)
+        except FileNotFoundError:
+            self.show_toast("Project not found", level="error")
+            messagebox.showerror("Plotinator", f"No project located at {target}", parent=self)
+            return
+        except Exception as exc:  # noqa: BLE001 - surfaced to UI
+            self.show_toast("Failed to open project", level="error")
+            messagebox.showerror("Plotinator", f"Unable to open project: {exc}", parent=self)
+            return
+
+        if project.paths.root.name == TEMP_PROJECT_FOLDER:
+            target_root = target if target.is_dir() else target.parent
+            try:
+                project = self._project_manager.save_project_as(target_root)
+            except Exception as exc:  # noqa: BLE001 - surfaced to UI
+                self.show_toast("Project migration failed", level="error")
+                messagebox.showerror(
+                    "Plotinator",
+                    f"Unable to migrate legacy workspace to {target_root}:\n{exc}",
+                    parent=self,
+                )
+                return
+
+        self._apply_project(project, record_state=record_state)
+        self._write_engine_config(project)
+        self._schedule_autosave(reset=True)
+        self.show_toast(f"Project loaded: {project.paths.root.name}", level="success")
+
+    # ------------------------------------------------------------------
+    def _update_recent_projects_menu(self) -> None:
+        menu = self._recent_menu
+        if menu is None:
+            return
+        menu.delete(0, "end")
+        if not self._app_state.recent_projects:
+            menu.add_command(label="(empty)", state="disabled")
+            return
+        for path in self._app_state.recent_projects:
+            label = path.name or str(path)
+            menu.add_command(label=label, command=lambda p=path: self._open_recent_project(p))
+
+    # ------------------------------------------------------------------
+    def _open_recent_project(self, path: Path) -> None:
+        if not path.exists() or not (path / "project.json").exists():
+            self._app_state.remove_project(path)
+            self._app_state.save()
+            self._update_recent_projects_menu()
+            self.show_toast("Recent project is unavailable", level="warning")
+            return
+        if not self._confirm_navigation():
+            return
+        self._open_project_path(path)
+
+    # ------------------------------------------------------------------
+    def _update_project_from_job(self) -> None:
+        project = self._project
+        if project is None:
+            return
+        project.update_from_config(self.job)
+        self.job.base_path = project.paths.data_dir
+
+    # ------------------------------------------------------------------
+    def _on_project_modified(self) -> None:
+        self._update_project_from_job()
+        self._schedule_autosave(reset=False)
+
+    # ------------------------------------------------------------------
+    def _write_engine_config(self, project: PlotinatorProject) -> None:
+        config_payload = project.to_config().to_dict()
+        project.paths.root.mkdir(parents=True, exist_ok=True)
+        with (project.paths.root / CONFIG_PATH).open("w", encoding="utf-8") as handle:
+            json.dump(config_payload, handle, indent=2)
+
+    # ------------------------------------------------------------------
+    def new_project_dialog(self) -> None:
+        if not self._confirm_navigation():
+            return
+        if self._worker and self._worker.is_running():
+            warning_message = "Stop the running batch before creating a new project."
+            self.show_toast(warning_message, level="warning")
+            messagebox.showwarning("Plotinator", warning_message)
+            return
+        self._stop_runner_thread()
+
+        initial_dir = self.folder or Path.home()
+        try:
+            initial = initial_dir.resolve()
+        except OSError:
+            initial = Path.home()
+
+        target = filedialog.asksaveasfilename(
+            title="Create Plotinator project",
+            defaultextension=".p10k",
+            filetypes=[("Plotinator Projects", "*.p10k"), ("All folders", "*.*")],
+            initialdir=str(initial),
+            initialfile="New Project.p10k",
+        )
+        if not target:
+            return
+
+        target_path = Path(target)
+        if target_path.exists():
+            try:
+                non_empty = any(target_path.iterdir())
+            except OSError:
+                non_empty = False
+            if non_empty and not messagebox.askyesno(
+                "Plotinator",
+                f"The folder {target_path} already contains files. Continue?",
+                parent=self,
+            ):
+                return
+
+        try:
+            project = self._project_manager.new_project(target_path)
+        except Exception as exc:  # noqa: BLE001 - surfaced to UI
+            self.show_toast("Failed to create project", level="error")
+            messagebox.showerror("Plotinator", f"Unable to create project: {exc}", parent=self)
+            return
+
+        self._apply_project(project, record_state=True)
+        self._write_engine_config(project)
+        self._schedule_autosave(reset=True)
+        self.show_toast("New project created", level="success")
+
+    # ------------------------------------------------------------------
+    def open_project_dialog(self) -> None:
+        if not self._confirm_navigation():
+            return
+        if self._worker and self._worker.is_running():
+            warning_message = "Stop the running batch before changing projects."
+            self.show_toast(warning_message, level="warning")
+            messagebox.showwarning("Plotinator", warning_message)
+            return
+        self._stop_runner_thread()
+        initial_dir = self.folder or Path.home()
+        try:
+            initial = initial_dir.resolve()
+        except OSError:
+            initial = Path.home()
+        location = filedialog.askdirectory(title="Open Plotinator project", initialdir=str(initial))
+        if not location:
+            return
+        self._open_project_path(Path(location))
+
+    # ------------------------------------------------------------------
+    def save_project_as_dialog(self) -> None:
+        project = self._project
+        if project is None:
+            self.show_toast("No project loaded", level="warning")
+            return
+
+        if self._worker and self._worker.is_running():
+            warning_message = "Stop the running batch before saving to a new location."
+            self.show_toast(warning_message, level="warning")
+            messagebox.showwarning("Plotinator", warning_message)
+            return
+        self._stop_runner_thread()
+
+        self._update_project_from_job()
+
+        target = filedialog.asksaveasfilename(
+            title="Save Project As",
+            defaultextension=".p10k",
+            filetypes=[("Plotinator Projects", "*.p10k"), ("All folders", "*.*")],
+            initialdir=str(project.paths.root.parent),
+            initialfile=f"{project.paths.root.stem}.p10k",
+        )
+        if not target:
+            return
+
+        target_path = Path(target)
+        if target_path == project.paths.root:
+            self.show_toast("Choose a different location for Save As", level="warning")
             return
 
         try:
-            self.job = load_config_file(self.config_path)
-        except ConfigError as exc:
-            error_message = f"Failed to load config: {exc}"
-            self._append_log(f"[CONFIG] {error_message}\n")
-            self.show_toast(error_message, level="error")
-            base_dir = self.config_path.parent.resolve()
-            self.job = PlotinatorConfig(base_path=base_dir, fits=[])
-            self.folder = base_dir
-            self.refresh_table()
-            self._refresh_available_data_files()
+            new_project = self._project_manager.save_project_as(target_path)
+        except FileExistsError as exc:
+            self.show_toast("Destination already exists", level="warning")
+            messagebox.showerror("Plotinator", str(exc), parent=self)
             return
-        self.folder = self.job.base_path
-        self.refresh_table()
-        self._refresh_available_data_files()
+        except Exception as exc:  # noqa: BLE001 - surfaced to UI
+            self.show_toast("Save As failed", level="error")
+            messagebox.showerror("Plotinator", f"Unable to save project: {exc}", parent=self)
+            return
+
+        self._apply_project(new_project, record_state=True)
+        self._write_engine_config(new_project)
+        self._schedule_autosave(reset=True)
+        self.show_toast("Project saved to new location", level="success")
 
     # ------------------------------------------------------------------
-    def save_config(self) -> None:
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        self.job.base_path = self.config_path.parent.resolve()
-        payload = self.job.to_dict()
-        with open(self.config_path, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh, indent=2)
-        self.show_toast("Configuration saved", level="success")
+    def _confirm_navigation(self) -> bool:
+        self._update_project_from_job()
+        if not self._project_manager.dirty:
+            return True
+        result = messagebox.askyesnocancel(
+            "Plotinator",
+            "Save changes before continuing?",
+            parent=self,
+        )
+        if result is None:
+            return False
+        if result:
+            return self.save_config()
+        return True
+
+    # ------------------------------------------------------------------
+    def _cancel_autosave_timer(self) -> None:
+        token = self._autosave_after_id
+        if token is None:
+            return
+        try:
+            self.after_cancel(token)
+        except Exception:
+            pass
+        self._autosave_after_id = None
+
+    # ------------------------------------------------------------------
+    def _schedule_autosave(self, *, reset: bool) -> None:
+        if reset:
+            self._cancel_autosave_timer()
+
+        interval = max(0, int(self._app_state.autosave_minutes))
+        if interval <= 0:
+            return
+        if self._autosave_after_id is not None:
+            return
+
+        delay_ms = interval * 60 * 1000
+        self._autosave_after_id = self.after(delay_ms, self._perform_autosave)
+
+    # ------------------------------------------------------------------
+    def _perform_autosave(self) -> None:
+        self._autosave_after_id = None
+        if self._autosave_in_progress:
+            self._schedule_autosave(reset=False)
+            return
+
+        self._update_project_from_job()
+        if not self._project_manager.dirty:
+            self._schedule_autosave(reset=False)
+            return
+
+        self._autosave_in_progress = True
+
+        def _worker() -> None:
+            try:
+                saved_project = self._project_manager.save_project()
+                self._write_engine_config(saved_project)
+            except Exception as exc:  # noqa: BLE001 - surfaced to UI
+                self.after(0, lambda e=exc: self._handle_save_failure(e, autosave=True))
+            else:
+                self.after(0, lambda p=saved_project: self._handle_autosave_success(p))
+            finally:
+                self._autosave_in_progress = False
+                self.after(0, lambda: self._schedule_autosave(reset=False))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    def _handle_autosave_success(self, project: PlotinatorProject) -> None:
+        self._project = project
+        self.folder = project.paths.data_dir
+        self._dismiss_autosave_error_dialog()
+        timestamp = datetime.now().astimezone().strftime("%H:%M:%S")
+        self.status_var.set(f"Autosaved at {timestamp}")
+
+    # ------------------------------------------------------------------
+    def _handle_save_failure(self, error: Exception, *, autosave: bool) -> None:
+        message = f"Failed to save project: {error}"
+        self._autosave_last_error = message
+        if autosave:
+            self.show_toast("Autosave failed", level="error")
+            self._show_autosave_error_dialog(message)
+        else:
+            self.show_toast(message, level="error")
+            messagebox.showerror("Plotinator", message, parent=self)
+
+    # ------------------------------------------------------------------
+    def _show_autosave_error_dialog(self, message: str) -> None:
+        self._autosave_error_message.set(message)
+        dialog = self._autosave_error_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.lift()
+            return
+
+        dialog = ttkb.Toplevel(self)
+        dialog.title("Autosave issue")
+        dialog.geometry("420x200")
+        dialog.transient(self)
+
+        ttkb.Label(
+            dialog,
+            textvariable=self._autosave_error_message,
+            wraplength=360,
+            justify="left",
+            padding=12,
+        ).pack(fill="both", expand=True)
+
+        button_frame = ttkb.Frame(dialog, padding=(12, 0, 12, 12))
+        button_frame.pack(fill="x")
+
+        ttkb.Button(
+            button_frame,
+            text="Retry now",
+            bootstyle="success",
+            command=self._retry_autosave_from_dialog,
+        ).pack(side="right")
+        ttkb.Button(
+            button_frame,
+            text="Dismiss",
+            command=self._dismiss_autosave_error_dialog,
+        ).pack(side="right", padx=(0, 8))
+
+        dialog.protocol("WM_DELETE_WINDOW", self._dismiss_autosave_error_dialog)
+        self._autosave_error_dialog = dialog
+
+    # ------------------------------------------------------------------
+    def _retry_autosave_from_dialog(self) -> None:
+        self._dismiss_autosave_error_dialog()
+        self.after(0, self.save_config)
+
+    # ------------------------------------------------------------------
+    def _dismiss_autosave_error_dialog(self) -> None:
+        dialog = self._autosave_error_dialog
+        if dialog is not None and dialog.winfo_exists():
+            dialog.destroy()
+        self._autosave_error_dialog = None
+
+    # ------------------------------------------------------------------
+    def _on_close(self) -> None:
+        if not self._confirm_navigation():
+            return
+        self._stop_runner_thread()
+        self._cancel_autosave_timer()
+        self._dismiss_autosave_error_dialog()
+        self._app_state.save()
+        try:
+            self.destroy()
+        except tk.TclError:
+            pass
+
+
+    def save_config(self) -> bool:
+        project = self._project
+        if project is None:
+            return False
+
+        self._update_project_from_job()
+        try:
+            project = self._project_manager.save_project()
+        except Exception as exc:  # noqa: BLE001 - surfaced to UI
+            self._handle_save_failure(exc, autosave=False)
+            return False
+
+        self._project = project
+        self._write_engine_config(project)
+        self.folder = project.paths.data_dir
+        self.show_toast("Project saved", level="success")
+        self._app_state.record_project(project.paths.root)
+        self._app_state.save()
+        self._update_recent_projects_menu()
+        self._cancel_autosave_timer()
+        self._schedule_autosave(reset=True)
+        self._dismiss_autosave_error_dialog()
+        return True
 
     # ------------------------------------------------------------------
     def _reload_from_mapping(self, mapping: dict) -> bool:
+        base_path = self._project.paths.data_dir if self._project is not None else self.job.base_path
         try:
-            self.job = load_config(mapping, base_path=self.job.base_path)
+            self.job = load_config(mapping, base_path=base_path)
         except ConfigError as exc:
             error_message = f"Invalid configuration change: {exc}"
             self._append_log(f"[CONFIG] {error_message}\n")
             self.show_toast(error_message, level="error")
             return False
         self.refresh_table()
+        self._on_project_modified()
         return True
 
     # ------------------------------------------------------------------
@@ -1255,23 +1737,7 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def select_folder(self) -> None:
-        folder = filedialog.askdirectory(title="Select data folder")
-        if not folder:
-            return
-
-        if self._worker and self._worker.is_running():
-            warning_message = "Stop the running batch before changing folders."
-            self.show_toast(warning_message, level="warning")
-            messagebox.showwarning("Plotinator", warning_message)
-            return
-
-        self._stop_runner_thread()
-        selected = Path(folder).resolve()
-        self.folder = selected
-        self.config_path = (selected / CONFIG_PATH).resolve()
-        self.job.base_path = selected
-        self.show_toast(f"Folder set to {self.folder}")
-        self.load_config()
+        self.open_project_dialog()
 
     # ------------------------------------------------------------------
     def add_fit(self) -> None:
