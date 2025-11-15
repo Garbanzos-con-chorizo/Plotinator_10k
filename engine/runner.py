@@ -88,6 +88,20 @@ class _EventDispatcher:
             print(f"[X] {event.get('error')}")
 
 
+def _emit_engine_output(
+    dispatcher: _EventDispatcher | None, title: str, output_text: str
+) -> None:
+    if dispatcher is None or not output_text:
+        return
+
+    context = title or "Engine"
+    for raw_line in output_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        dispatcher.log(f"[ENGINE:{context}] {line}")
+
+
 def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
     """Run a gnuplot script inside *workdir* and return combined stdout/stderr."""
 
@@ -256,6 +270,7 @@ def process_plot(
 
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
+    _emit_engine_output(dispatcher, plot_cfg.get("title", "Untitled"), output_text)
     params = parse_fit_output(output_text)
     fit_statistics = parse_fit_statistics(output_text)
 
@@ -273,7 +288,10 @@ def process_plot(
         resid_code = generate_gnuplot_code(
             plot_cfg, out_plot=None, out_residuals=residuals_path
         )
-        run_gnuplot_script(resid_code, workdir=plot_dir)
+        residual_output = run_gnuplot_script(resid_code, workdir=plot_dir)
+        _emit_engine_output(
+            dispatcher, f"{plot_cfg.get('title', 'Untitled')} residuals", residual_output
+        )
     else:
         residuals_path = None
         metrics = {}
