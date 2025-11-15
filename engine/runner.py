@@ -4,7 +4,9 @@ import copy
 import datetime
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict
@@ -19,6 +21,7 @@ from .script_builder import (
     compute_residual_metrics,
     generate_gnuplot_code,
     parse_fit_output,
+    parse_fit_statistics,
 )
 
 __all__ = [
@@ -45,6 +48,9 @@ class _EventDispatcher:
 
     def log(self, message: str) -> None:
         self.emit("log", message=message)
+
+    def has_callback(self) -> bool:
+        return self._callback is not None
 
     @staticmethod
     def _default_handle(event: Dict[str, Any]) -> None:
@@ -103,6 +109,63 @@ def run_gnuplot_script(gnuplot_code: str, workdir: str) -> str:
         lf.write(output)
 
     return output
+
+
+def _normalize_path(path: str | None) -> str | None:
+    if not path:
+        return None
+    return os.path.abspath(path).replace("\\", "/")
+
+
+def _prepare_preview_payload(result: dict[str, Any]) -> dict[str, Any]:
+    output_plot = result.get("output_plot")
+    residuals_plot = result.get("residuals_plot")
+    preview_plot = output_plot
+    preview_residuals = residuals_plot
+    cleanup_dir: str | None = None
+
+    metrics = copy.deepcopy(result.get("metrics") or {})
+    parameters = copy.deepcopy(result.get("parameters") or {})
+
+    existing_files: list[tuple[str, str]] = []
+    if isinstance(output_plot, str) and os.path.exists(output_plot):
+        existing_files.append(("plot", output_plot))
+    if isinstance(residuals_plot, str) and os.path.exists(residuals_plot):
+        existing_files.append(("residuals", residuals_plot))
+
+    if existing_files:
+        cleanup_dir = tempfile.mkdtemp(prefix="plotinator_preview_")
+        try:
+            for kind, source in existing_files:
+                base_name = os.path.basename(source) or (
+                    "plot.png" if kind == "plot" else "residuals.png"
+                )
+                target_path = os.path.join(cleanup_dir, base_name)
+                shutil.copy2(source, target_path)
+                normalized = _normalize_path(target_path)
+                if kind == "plot":
+                    preview_plot = normalized
+                else:
+                    preview_residuals = normalized
+        except Exception:
+            shutil.rmtree(cleanup_dir, ignore_errors=True)
+            cleanup_dir = None
+            preview_plot = output_plot
+            preview_residuals = residuals_plot
+
+    payload = {
+        "output_plot": _normalize_path(preview_plot or output_plot),
+        "residuals_plot": _normalize_path(preview_residuals or residuals_plot),
+        "metrics": metrics,
+        "parameters": parameters,
+        "cleanup_dir": _normalize_path(cleanup_dir),
+        "source": {
+            "output_plot": _normalize_path(output_plot),
+            "residuals_plot": _normalize_path(residuals_plot),
+        },
+    }
+
+    return payload
 
 
 def _normalize_dataset_for_processing(dataset: dict, base_plot_dir: str, index: int) -> dict:
@@ -194,13 +257,18 @@ def process_plot(
     main_code = generate_gnuplot_code(plot_cfg, out_plot)
     output_text = run_gnuplot_script(main_code, workdir=plot_dir)
     params = parse_fit_output(output_text)
+    fit_statistics = parse_fit_statistics(output_text)
 
     residuals_path: str | None
-    metrics: dict | None
     if params and plot_cfg.get("residuals", True):
         residuals_path = os.path.join(plot_dir, "residuals.png").replace("\\", "/")
-        metrics = compute_residual_metrics(
-            plot_cfg["datafile"], plot_cfg.get("column_map", {}), params, plot_cfg["fit_formula"]
+        metrics = dict(
+            compute_residual_metrics(
+                plot_cfg["datafile"],
+                plot_cfg.get("column_map", {}),
+                params,
+                plot_cfg["fit_formula"],
+            )
         )
         resid_code = generate_gnuplot_code(
             plot_cfg, out_plot=None, out_residuals=residuals_path
@@ -208,7 +276,13 @@ def process_plot(
         run_gnuplot_script(resid_code, workdir=plot_dir)
     else:
         residuals_path = None
-        metrics = None
+        metrics = {}
+
+    metrics.update(fit_statistics)
+    if "rmse" in metrics and "rms" not in metrics:
+        metrics["rms"] = metrics["rmse"]
+    if "rms" in metrics and "rmse" not in metrics:
+        metrics["rmse"] = metrics["rms"]
 
     column_map = plot_cfg.get("column_map", {})
     confidence_notes = None
@@ -243,8 +317,13 @@ def process_plot(
         "confidence_notes": confidence_notes,
     }
 
+    event_kwargs: dict[str, Any] = {"title": plot_cfg.get("title", "Untitled")}
+    if dispatcher and dispatcher.has_callback():
+        event_kwargs["result"] = copy.deepcopy(result)
+        event_kwargs["preview"] = _prepare_preview_payload(result)
+
     if dispatcher:
-        dispatcher.emit("plot-complete", title=plot_cfg.get("title", "Untitled"))
+        dispatcher.emit("plot-complete", **event_kwargs)
     else:
         print(f"[OK] Finished: {plot_cfg['title']}")
     return result

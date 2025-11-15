@@ -4,6 +4,7 @@ import copy
 import json
 import math
 import queue
+import shutil
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -144,6 +145,8 @@ class PlotinatorApp(ttkb.Window):
         self._preview_summary_vars: dict[str, tk.StringVar] = {}
         self._preview_photo_main: tk.PhotoImage | None = None
         self._preview_photo_residual: tk.PhotoImage | None = None
+        self._preview_active_temp_dir: Path | None = None
+        self._preview_stale_temp_dirs: set[Path] = set()
         self._preview_pane_visible = False
         self._current_output_dir: Path | None = None
         self._current_preview_title: str | None = None
@@ -360,6 +363,62 @@ class PlotinatorApp(ttkb.Window):
             var.set("—")
 
     # ------------------------------------------------------------------
+    def _queue_preview_temp_cleanup(self, directory: Path | None) -> None:
+        if directory is None:
+            return
+        self._preview_stale_temp_dirs.add(directory)
+
+    # ------------------------------------------------------------------
+    def _cleanup_stale_preview_dirs(self) -> None:
+        stale = list(self._preview_stale_temp_dirs)
+        self._preview_stale_temp_dirs.clear()
+        for directory in stale:
+            shutil.rmtree(directory, ignore_errors=True)
+
+    # ------------------------------------------------------------------
+    def _cleanup_all_preview_temp_dirs(self) -> None:
+        if self._preview_active_temp_dir is not None:
+            self._preview_stale_temp_dirs.add(self._preview_active_temp_dir)
+            self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
+
+    # ------------------------------------------------------------------
+    def _activate_preview_temp_dir(self, payload: dict[str, Any]) -> None:
+        cleanup_dir = payload.get("cleanup_dir")
+        if not cleanup_dir:
+            return
+        try:
+            directory = Path(str(cleanup_dir))
+        except (TypeError, ValueError, OSError):
+            return
+        if directory == self._preview_active_temp_dir:
+            return
+        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = directory
+
+    # ------------------------------------------------------------------
+    def _result_from_preview_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result_payload = payload.get("result")
+        if isinstance(result_payload, dict):
+            return copy.deepcopy(result_payload)
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        return {
+            "output_plot": payload.get("output_plot") or source.get("output_plot"),
+            "residuals_plot": payload.get("residuals_plot") or source.get("residuals_plot"),
+            "metrics": copy.deepcopy(payload.get("metrics") or {}),
+            "parameters": copy.deepcopy(payload.get("parameters") or {}),
+        }
+
+    # ------------------------------------------------------------------
+    def _load_preview_from_payload(self, payload: dict[str, Any], title: str) -> None:
+        result = self._result_from_preview_payload(payload)
+        self._apply_preview_result_data(result)
+        plot_loaded = self._update_main_image_from_path(result.get("output_plot"))
+        if not plot_loaded:
+            self._update_preview_message(f"Preview not available for \"{title}\".")
+        self._update_residual_image_from_path(result.get("residuals_plot"))
+
+    # ------------------------------------------------------------------
     def _ensure_preview_pane(self) -> None:
         if self._content_paned is None or self._preview_container is None:
             return
@@ -394,6 +453,7 @@ class PlotinatorApp(ttkb.Window):
         self._preview_photo_residual = None
         self._current_preview_title = None
         self._latest_preview_title = None
+        self._cleanup_all_preview_temp_dirs()
 
     # ------------------------------------------------------------------
     def _update_main_image_from_path(self, path: Path | str | None) -> bool:
@@ -510,6 +570,9 @@ class PlotinatorApp(ttkb.Window):
     # ------------------------------------------------------------------
     def _on_preview_plot_start(self, title: str) -> None:
         self._ensure_preview_pane()
+        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
         self._preview_header_var.set(f"Preview: {title}")
         self._update_preview_message(f"Preparing preview for \"{title}\"…")
         self._clear_preview_summary()
@@ -523,16 +586,26 @@ class PlotinatorApp(ttkb.Window):
         self._current_preview_title = title
 
     # ------------------------------------------------------------------
-    def _on_preview_plot_complete(self, title: str) -> None:
+    def _on_preview_plot_complete(
+        self, title: str, payload: dict[str, Any] | None = None
+    ) -> None:
         self._ensure_preview_pane()
         self._preview_header_var.set(f"Preview: {title}")
         self._latest_preview_title = title
         self._current_preview_title = title
-        self._load_preview_images(title)
+        if payload:
+            self._activate_preview_temp_dir(payload)
+            self._load_preview_from_payload(payload, title)
+        else:
+            self._load_preview_images(title)
+        self._cleanup_stale_preview_dirs()
 
     # ------------------------------------------------------------------
     def _on_preview_plot_error(self, title: str, error: str) -> None:
         self._ensure_preview_pane()
+        self._queue_preview_temp_cleanup(self._preview_active_temp_dir)
+        self._preview_active_temp_dir = None
+        self._cleanup_stale_preview_dirs()
         self._preview_header_var.set(f"Preview: {title}")
         self._update_preview_message(f"Preview unavailable: {error}")
         if self._preview_residual_label is not None:
@@ -573,6 +646,7 @@ class PlotinatorApp(ttkb.Window):
         self._current_output_dir = None
         self._current_preview_title = None
         self._latest_preview_title = None
+        self._cleanup_all_preview_temp_dirs()
 
     # ------------------------------------------------------------------
     def _reset_preview_state(self) -> None:
@@ -886,7 +960,15 @@ class PlotinatorApp(ttkb.Window):
             self._set_status(
                 f"Completed {self._progress_completed}/{total_display}: {title}"
             )
-            self._on_preview_plot_complete(title)
+            preview_payload = event.get("preview")
+            if isinstance(preview_payload, dict):
+                preview_payload = dict(preview_payload)
+                result_payload = event.get("result")
+                if isinstance(result_payload, dict):
+                    preview_payload.setdefault("result", result_payload)
+            else:
+                preview_payload = None
+            self._on_preview_plot_complete(title, preview_payload)
             return
 
         if etype == "plot-error":
@@ -1038,6 +1120,7 @@ class PlotinatorApp(ttkb.Window):
         stop_runner = getattr(self, "_stop_runner_thread", None)
         if callable(stop_runner):
             stop_runner()
+        self._cleanup_all_preview_temp_dirs()
         super().destroy()
 
     # ------------------------------------------------------------------
