@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog
 from typing import Any, Callable, Sequence
+import weakref
 
 import ttkbootstrap as ttkb
 
@@ -34,6 +35,17 @@ _TOAST_COLORS: dict[str, str] = {
     "error": "#C0392B",
 }
 
+_TOAST_ANIMATION_STEP_MS = 15
+_TOAST_ANIMATION_DISTANCE = 12
+_TOAST_LIFETIME_MS = 3200
+_TOAST_MARGIN = 14
+_TOAST_WIDTH = 320
+_TOAST_MIN_WIDTH = 240
+_TOAST_MAX_WIDTH = 360
+_TOAST_OPACITY_STEP = 0.08
+
+_toast_registry: weakref.WeakKeyDictionary[tk.Misc, list[tk.Toplevel]] = weakref.WeakKeyDictionary()
+
 
 def _show_toast(widget: tk.Misc, message: str, level: str = "info") -> None:
     """Display a temporary notification near the widget's toplevel window."""
@@ -43,16 +55,137 @@ def _show_toast(widget: tk.Misc, message: str, level: str = "info") -> None:
     except tk.TclError:
         return
 
+    def _remove_toast(toast: tk.Toplevel) -> None:
+        try:
+            anchor_toasts = _toast_registry.get(anchor, [])
+            if toast in anchor_toasts:
+                anchor_toasts.remove(toast)
+        except Exception:
+            pass
+
+        def _fade_out() -> None:
+            try:
+                alpha = float(toast.attributes("-alpha"))
+            except tk.TclError:
+                return
+            next_alpha = alpha - _TOAST_OPACITY_STEP
+            if next_alpha <= 0:
+                try:
+                    toast.destroy()
+                except tk.TclError:
+                    pass
+                _reposition_toasts()
+                return
+            try:
+                toast.attributes("-alpha", next_alpha)
+            except tk.TclError:
+                return
+            toast.after(_TOAST_ANIMATION_STEP_MS, _fade_out)
+
+        _fade_out()
+
+    def _animate_to(toast: tk.Toplevel, x: int, target_y: int) -> None:
+        try:
+            current_y = toast.winfo_y()
+        except tk.TclError:
+            return
+
+        dy = target_y - current_y
+        step = min(_TOAST_ANIMATION_DISTANCE, max(-_TOAST_ANIMATION_DISTANCE, dy))
+        next_y = current_y + step if abs(dy) > 1 else target_y
+
+        try:
+            toast.geometry(f"{toast._toast_width}x{toast._toast_height}+{x}+{next_y}")  # type: ignore[attr-defined]
+            alpha = float(toast.attributes("-alpha"))
+            if alpha < 1:
+                toast.attributes("-alpha", min(1, alpha + _TOAST_OPACITY_STEP))
+        except tk.TclError:
+            return
+
+        if abs(dy) > 1:
+            toast.after(_TOAST_ANIMATION_STEP_MS, lambda: _animate_to(toast, x, target_y))
+
+    def _reposition_toasts() -> None:
+        toasts = _toast_registry.get(anchor, [])
+        if not toasts:
+            return
+
+        try:
+            anchor.update_idletasks()
+            anchor_x = anchor.winfo_rootx()
+            anchor_y = anchor.winfo_rooty()
+            anchor_height = anchor.winfo_height()
+            anchor_width = anchor.winfo_width()
+        except tk.TclError:
+            return
+
+        try:
+            max_width = max(getattr(toast, "_toast_width", _TOAST_WIDTH) for toast in toasts)
+        except ValueError:
+            max_width = _TOAST_WIDTH
+
+        x = anchor_x + anchor_width - max_width - _TOAST_MARGIN
+        y = anchor_y + anchor_height - _TOAST_MARGIN
+
+        for toast in reversed(toasts):
+            try:
+                toast.update_idletasks()
+                toast_height = toast.winfo_height() or getattr(toast, "_toast_height", 60)
+            except tk.TclError:
+                continue
+            y -= toast_height
+            target_y = y
+            y -= _TOAST_MARGIN
+            _animate_to(toast, x, target_y)
+
     def _create_toast() -> None:
         toast = tk.Toplevel(anchor)
         toast.overrideredirect(True)
         toast.configure(bg=_TOAST_COLORS.get(level, _TOAST_COLORS["info"]))
-        ttkb.Label(toast, text=message, bootstyle="inverse", padding=10).pack()
+
+        container = ttkb.Frame(toast, padding=(12, 10))
+        container.pack(fill="both", expand=True)
+        ttkb.Label(
+            container,
+            text=message,
+            bootstyle="inverse",
+            justify="left",
+            wraplength=_TOAST_MAX_WIDTH - 32,
+        ).pack(fill="both", expand=True)
+
         anchor.update_idletasks()
-        x = anchor.winfo_rootx() + anchor.winfo_width() - 260
-        y = anchor.winfo_rooty() + anchor.winfo_height() - 100
-        toast.geometry(f"240x60+{x}+{y}")
-        toast.after(2500, toast.destroy)
+
+        width = max(_TOAST_MIN_WIDTH, min(_TOAST_MAX_WIDTH, container.winfo_reqwidth() + 16))
+        height = container.winfo_reqheight() + 12
+        toast._toast_width = width  # type: ignore[attr-defined]
+        toast._toast_height = height  # type: ignore[attr-defined]
+
+        try:
+            anchor_toasts = _toast_registry.setdefault(anchor, [])
+            anchor_toasts.append(toast)
+        except Exception:
+            _toast_registry.clear()
+            _toast_registry[anchor] = [toast]
+
+        try:
+            toast.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+
+        anchor.update_idletasks()
+        start_x = anchor.winfo_rootx() + anchor.winfo_width() - width - _TOAST_MARGIN
+        start_y = anchor.winfo_rooty() + anchor.winfo_height() + _TOAST_MARGIN
+        toast.geometry(f"{width}x{height}+{start_x}+{start_y}")
+
+        toast.after(_TOAST_LIFETIME_MS, lambda: _remove_toast(toast))
+
+        if not getattr(anchor, "_toast_configure_binding", None):  # type: ignore[attr-defined]
+            try:
+                anchor._toast_configure_binding = anchor.bind("<Configure>", lambda _event: _reposition_toasts())  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        _reposition_toasts()
 
     try:
         anchor.after(0, _create_toast)
@@ -129,8 +262,10 @@ class PlotinatorApp(ttkb.Window):
         super().__init__(themename="superhero")
         self._base_window_title = f"Plotinator Open Beta v{PACKAGE_VERSION}"
         self.title(self._base_window_title)
-        self.geometry("1200x800")
+        self.geometry("1320x900")
         self.resizable(True, True)
+        self.update_idletasks()
+        self.minsize(max(1220, self.winfo_reqwidth()), max(860, self.winfo_reqheight()))
 
         base_style = getattr(self, "style", None)
         self._style = base_style if isinstance(base_style, ttkb.Style) else ttkb.Style()
