@@ -12,7 +12,7 @@ import tkinter as tk
 import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import filedialog, messagebox, simpledialog
+from tkinter import colorchooser, filedialog, messagebox, simpledialog
 from typing import Any, Callable, Sequence
 import weakref
 
@@ -2617,6 +2617,19 @@ class PlotinatorApp(ttkb.Window):
 
         # General tab --------------------------------------------------
         entries: dict[str, ttkb.Entry] = {}
+
+        def _pick_color(target: ttkb.Entry) -> None:
+            try:
+                initial = target.get().strip() or None
+            except tk.TclError:
+                initial = None
+            chosen: tuple[tuple[int, int, int] | None, str | None] = colorchooser.askcolor(
+                color=initial, title="Choose color"
+            )
+            hex_value = chosen[1]
+            if hex_value:
+                target.delete(0, tk.END)
+                target.insert(0, hex_value)
         for i, (label, key) in enumerate([
             ("Title", "title"),
             ("Formula", "formula"),
@@ -2627,7 +2640,15 @@ class PlotinatorApp(ttkb.Window):
             entry.grid(row=i, column=1, sticky="ew", padx=5, pady=6)
             entry.insert(0, data.get(key, ""))
             entries[key] = entry
+            if key == "color":
+                ttkb.Button(
+                    general_tab,
+                    text="Pick…",
+                    command=lambda target=entry: _pick_color(target),
+                    bootstyle="secondary-outline",
+                ).grid(row=i, column=2, sticky="w", padx=5, pady=6)
         general_tab.columnconfigure(1, weight=1)
+        general_tab.columnconfigure(2, weight=0)
 
         residual_var = tk.BooleanVar(value=data.get("residuals", True))
         ttkb.Checkbutton(
@@ -3076,6 +3097,22 @@ class DatasetDialog(ttkb.Toplevel):
         self.color_entry = ttkb.Entry(self)
         self.color_entry.grid(row=6, column=1, columnspan=2, sticky="ew", padx=10, pady=6)
         self.color_entry.insert(0, style.get("line_color", ""))
+
+        def pick_dataset_color() -> None:
+            chosen: tuple[tuple[int, int, int] | None, str | None] = colorchooser.askcolor(
+                color=self.color_entry.get() or None, title="Choose line color"
+            )
+            hex_value = chosen[1]
+            if hex_value:
+                self.color_entry.delete(0, tk.END)
+                self.color_entry.insert(0, hex_value)
+
+        ttkb.Button(
+            self,
+            text="Pick…",
+            command=pick_dataset_color,
+            bootstyle="secondary-outline",
+        ).grid(row=6, column=3, sticky="w", padx=10, pady=6)
 
         ttkb.Label(self, text="Preprocessing (JSON list)").grid(
             row=7,
