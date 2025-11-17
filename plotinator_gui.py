@@ -2061,7 +2061,7 @@ class PlotinatorApp(ttkb.Window):
             self._append_log(f"[CONFIG] {error_message}\n")
             self.show_toast(error_message, level="error")
             return False
-        project.update_from_config(updated_config)
+        project.update_from_config(new_config)
         self.job = project.config
         self.refresh_table()
         self._refresh_available_data_files()
