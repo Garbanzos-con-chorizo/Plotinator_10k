@@ -2024,7 +2024,10 @@ class PlotinatorApp(ttkb.Window):
             pass
 
 
-    def save_config(self) -> bool:
+    def save_project(self, *, show_feedback: bool = True) -> bool:
+        return self.save_config(show_feedback=show_feedback)
+
+    def save_config(self, *, show_feedback: bool = True) -> bool:
         project = self._project
         if project is None:
             return False
@@ -2039,7 +2042,8 @@ class PlotinatorApp(ttkb.Window):
         self._project = project
         self._write_engine_config(project)
         self.folder = project.paths.data_dir
-        self.show_toast("Project saved", level="success")
+        if show_feedback:
+            self.show_toast("Project saved", level="success")
         self._app_state.record_project(project.paths.root)
         self._app_state.save()
         self._update_recent_projects_menu()
