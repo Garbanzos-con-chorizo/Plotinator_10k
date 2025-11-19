@@ -67,9 +67,9 @@ against `<project>/data` to guarantee reproducible runs.
 
 A ready-to-run troubleshooting project lives in `projects/TroubleshootingDemo.p10k`. Point the CLI
 or GUI at that folder (or its `settings.json`) to confirm dataset resolution: its
-`troubleshoot_sample.dat` file sits inside the project's `data/` directory so relative paths cannot
-escape the expected data root. Copy additional `.dat` files into that `data/` directory when
-debugging "missing data" errors.
+`data/troubleshoot_sample.dat` file sits inside the project so relative paths cannot escape the
+expected data root. Copy additional `.dat` files into that `data/` directory when debugging
+"missing data" errors.
 
 ## Installation
 
