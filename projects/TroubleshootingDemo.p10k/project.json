@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "label": "Troubleshooting Demo",
+  "description": "Sample .p10k project inside the Plotinator folder for data-path debugging."
+}
