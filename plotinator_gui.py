@@ -28,6 +28,37 @@ from plotinator.project import PlotinatorProject, ProjectManager, ProjectMetadat
 
 CONFIG_PATH = "config.json"
 
+_PREMADE_FITS: list[dict[str, object]] = [
+    {
+        "key": "linear",
+        "title": "Linear fit",
+        "formula": "a*x + b",
+        "description": "Straight line with slope and intercept",
+        "color": "#1f77b4",
+    },
+    {
+        "key": "quadratic",
+        "title": "Quadratic fit",
+        "formula": "a*x**2 + b*x + c",
+        "description": "Second-order polynomial for curved trends",
+        "color": "#9467bd",
+    },
+    {
+        "key": "exponential",
+        "title": "Exponential decay",
+        "formula": "a*exp(-b*x) + c",
+        "description": "Typical decay or relaxation behaviour",
+        "color": "#d62728",
+    },
+    {
+        "key": "gaussian",
+        "title": "Gaussian peak",
+        "formula": "a*exp(-(x-b)**2/(2*c**2))",
+        "description": "Single peak with centre and width parameters",
+        "color": "#2ca02c",
+    },
+]
+
 _TOAST_COLORS: dict[str, str] = {
     "info": "#2E86C1",
     "success": "#27AE60",
@@ -2160,7 +2191,98 @@ class PlotinatorApp(ttkb.Window):
 
     # ------------------------------------------------------------------
     def add_fit(self) -> None:
-        self._open_fit_editor()
+        template = self._prompt_fit_template()
+        if template is False:
+            return
+        self._open_fit_editor(template or None)
+
+    # ------------------------------------------------------------------
+    def _prompt_fit_template(self) -> dict | None | bool:
+        options: list[dict[str, object | None]] = [
+            {
+                "key": "blank",
+                "title": "Start from scratch",
+                "formula": "Custom",
+                "description": "Open an empty fit editor",
+                "payload": None,
+            },
+            *(_PREMADE_FITS or []),
+        ]
+
+        dialog = ttkb.Toplevel(self)
+        dialog.title("Add fit")
+        dialog.geometry("640x300")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        ttkb.Label(
+            dialog,
+            text="Choose a premade fit or start from a blank configuration.",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        columns = ("Title", "Formula", "Description")
+        tree = ttkb.Treeview(
+            dialog,
+            columns=columns,
+            show="headings",
+            height=6,
+            bootstyle="info",
+        )
+        for col, width in zip(columns, (180, 180, 240), strict=False):
+            tree.heading(col, text=col)
+            tree.column(col, width=width, anchor="w")
+        tree.pack(fill="both", expand=True, padx=10, pady=6)
+
+        mapping: dict[str, dict | None] = {}
+        allowed_keys = {"title", "formula", "color", "residuals", "layout", "style", "datasets"}
+        for option in options:
+            key = str(option.get("key"))
+            values = (
+                str(option.get("title", "")),
+                str(option.get("formula", "")),
+                str(option.get("description", "")),
+            )
+            tree.insert("", "end", iid=key, values=values)
+            payload = option["payload"] if "payload" in option else option
+            if payload is None:
+                mapping[key] = None
+            elif isinstance(payload, dict):
+                mapping[key] = {k: copy.deepcopy(v) for k, v in payload.items() if k in allowed_keys}
+            else:
+                mapping[key] = None
+
+        if options:
+            tree.selection_set(options[0].get("key"))
+            tree.focus(options[0].get("key"))
+
+        result: list[dict | None | bool] = []
+
+        def _accept(*_args: object) -> None:
+            selection = tree.selection()
+            if not selection:
+                self.show_toast("Select a template to continue", level="warning")
+                return
+            chosen_key = selection[0]
+            result.append(mapping.get(chosen_key))
+            dialog.destroy()
+
+        def _cancel() -> None:
+            result.append(False)
+            dialog.destroy()
+
+        tree.bind("<Double-1>", _accept)
+        button_frame = ttkb.Frame(dialog)
+        button_frame.pack(fill="x", padx=10, pady=(0, 10))
+        ttkb.Button(button_frame, text="Cancel", command=_cancel).pack(side="right", padx=6)
+        ttkb.Button(button_frame, text="Use selection", bootstyle="success", command=_accept).pack(
+            side="right", padx=6
+        )
+
+        dialog.protocol("WM_DELETE_WINDOW", _cancel)
+        dialog.wait_window(dialog)
+
+        return result[-1] if result else False
 
     # ------------------------------------------------------------------
     def delete_fit(self) -> None:
@@ -2598,6 +2720,17 @@ class PlotinatorApp(ttkb.Window):
         }
         if isinstance(fit, FitConfig):
             data = fit.to_dict(relative_to=self._require_project().paths.data_dir)
+        elif isinstance(fit, dict):
+            data = copy.deepcopy(base)
+            layout_override = fit.get("layout") if isinstance(fit.get("layout"), dict) else {}
+            style_override = fit.get("style") if isinstance(fit.get("style"), dict) else {}
+            for key, value in fit.items():
+                if key == "layout":
+                    data["layout"].update(copy.deepcopy(layout_override))
+                elif key == "style":
+                    data["style"] = copy.deepcopy(style_override)
+                else:
+                    data[key] = copy.deepcopy(value)
         else:
             data = copy.deepcopy(base)
         style_data = copy.deepcopy(data.get("style", {})) if isinstance(data.get("style"), dict) else {}
