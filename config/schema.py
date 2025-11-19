@@ -255,9 +255,14 @@ class DataSourceConfig:
         if not raw_path:
             raise ConfigError(f"{context} requires a 'path'")
         raw_path_str = str(raw_path)
-        candidate = Path(raw_path_str)
+        raw_candidate = Path(raw_path_str).expanduser()
+        candidate = raw_candidate
         if not candidate.is_absolute():
             candidate = (base_dir / candidate).resolve()
+        if not candidate.exists() and not raw_candidate.is_absolute():
+            fallback = (base_dir.parent / raw_candidate).resolve()
+            if fallback.exists():
+                candidate = fallback
         if not candidate.exists():
             raise ConfigError(f"Data file not found for {context}: {raw_path_str}")
         columns = ColumnMapping.from_mapping(data.get("columns"), context=f"{context}.columns")
