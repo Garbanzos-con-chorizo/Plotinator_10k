@@ -75,3 +75,33 @@ def test_load_config_file_requires_pyyaml(sample_paths) -> None:
 
     with pytest.raises(ConfigError, match="PyYAML is required to load YAML configuration files"):
         load_config_file(yaml_path)
+
+
+def test_data_source_accepts_project_root_relative_paths(sample_paths: SimpleNamespace) -> None:
+    """Relative paths anchored at the project root should resolve inside data/."""
+
+    project_root = sample_paths.config_dir / "demo_project"
+    data_dir = project_root / "data"
+    data_dir.mkdir(parents=True)
+
+    data_file = data_dir / "series.dat"
+    data_file.write_text("0 0\n1 1\n", encoding="utf-8")
+
+    config_payload = {
+        "fits": [
+            {
+                "title": "Root-relative dataset",
+                "formula": "m*x + c",
+                "data_source": {
+                    "path": f"data/{data_file.name}",
+                    "columns": {"x": 1, "y": 2},
+                },
+            }
+        ]
+    }
+
+    config = load_config(config_payload, base_path=data_dir)
+
+    data_source = config.fits[0].datasets[0].data_source
+    assert data_source.path == data_file
+    assert data_source.original_path == f"data/{data_file.name}"
