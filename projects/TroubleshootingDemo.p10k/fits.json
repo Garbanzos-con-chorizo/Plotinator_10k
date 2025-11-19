@@ -1,0 +1,36 @@
+[
+  {
+    "title": "Troubleshooting Linear Fit",
+    "formula": "m*x + c",
+    "residuals": true,
+    "layout": {
+      "rows": 1,
+      "columns": 1,
+      "shared_x": false,
+      "shared_y": false,
+      "show_legend": true
+    },
+    "datasets": [
+      {
+        "label": "Demo dataset with inline errors",
+        "data_source": {
+          "path": "troubleshoot_sample.dat",
+          "columns": {
+            "x": 1,
+            "y": 2,
+            "error": 3
+          },
+          "preprocessing": []
+        },
+        "pane_index": 1,
+        "style": {
+          "line_color": "#1f77b4"
+        }
+      }
+    ],
+    "style": {
+      "line_color": "#1f77b4"
+    },
+    "color": "#1f77b4"
+  }
+]
