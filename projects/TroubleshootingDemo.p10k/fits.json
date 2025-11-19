@@ -14,7 +14,7 @@
       {
         "label": "Demo dataset with inline errors",
         "data_source": {
-          "path": "data/troubleshoot_sample.dat",
+          "path": "troubleshoot_sample.dat",
           "columns": {
             "x": 1,
             "y": 2,
